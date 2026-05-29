@@ -8578,7 +8578,7 @@ export default function App() {
   }, [friends, userPhone]);
 
   const [startPage, setStartPage] = useState<string>(() => {
-    try { return localStorage.getItem('rouh_start_page') || 'calc'; } catch (e) { return 'calc'; }
+    try { return localStorage.getItem('rouh_start_page') || 'ai'; } catch (e) { return 'ai'; }
   });
   const [skipSplash, setSkipSplash] = useState<boolean>(() => {
     try { return localStorage.getItem('rouh_skip_splash') === 'true'; } catch (e) { return false; }
@@ -8613,9 +8613,9 @@ export default function App() {
     
     // 3. Fallback to Session Restoration or Default
     try {
-      return localStorage.getItem('rouh_active_tab') || 'services';
+      return localStorage.getItem('rouh_active_tab') || 'ai';
     } catch (e) {
-      return 'services';
+      return 'ai';
     }
   });
 
