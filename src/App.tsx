@@ -577,6 +577,25 @@ const SmartChatTab = ({
     }
   }, [initialTargetFriend]);
 
+  const updateClientLastSeen = async () => {
+    if (!userPhone) return;
+    try {
+      const { isFirebasePlaceholder } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
+        const { doc, setDoc, collection } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        const userRef = doc(collection(db, 'a', 'ab', 'users'), userPhone);
+        await setDoc(userRef, {
+          username: localStorage.getItem('userName') || 'عضو روح',
+          phone: userPhone,
+          lastSeen: new Date().toISOString()
+        }, { merge: true });
+      }
+    } catch (err) {
+      console.warn("Client lastSeen sync failed:", err);
+    }
+  };
+
   const refreshMessages = async () => {
     if (!userPhone) return;
 
@@ -592,13 +611,51 @@ const SmartChatTab = ({
       return;
     }
 
+    let inboxData: any[] = [];
+    let sentData: any[] = [];
+
+    // First try proxy API
     try {
       const inboxRes = await fetch(`/api/chat/inbox/${userPhone}`);
       const sentRes = await fetch(`/api/chat/sent/${userPhone}`);
       
-      const inboxData = inboxRes.ok ? await inboxRes.json() : [];
-      const sentData = sentRes.ok ? await sentRes.json() : [];
-      
+      inboxData = inboxRes.ok ? await inboxRes.json() : [];
+      sentData = sentRes.ok ? await sentRes.json() : [];
+    } catch (err) {
+      console.warn("Proxy chat history fetch error:", err);
+    }
+
+    // Always merge in messages directly from Cloud Firestore (primary for Vercel/production)
+    try {
+      const { isFirebasePlaceholder } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
+        const { getDocs, query, where, collection } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        const chatsRef = collection(db, 'a', 'ab', 'chats');
+        
+        const [snapFrom, snapTo] = await Promise.all([
+          getDocs(query(chatsRef, where('from', '==', userPhone))),
+          getDocs(query(chatsRef, where('to', '==', userPhone)))
+        ]);
+
+        const fSent: any[] = [];
+        snapFrom.forEach(docSnap => {
+          fSent.push({ id: docSnap.id, ...docSnap.data() });
+        });
+
+        const fInbox: any[] = [];
+        snapTo.forEach(docSnap => {
+          fInbox.push({ id: docSnap.id, ...docSnap.data() });
+        });
+
+        sentData = [...sentData, ...fSent];
+        inboxData = [...inboxData, ...fInbox];
+      }
+    } catch (err) {
+      console.error("Direct Firestore messages query failed:", err);
+    }
+
+    try {
       const combined = [...inboxData, ...sentData];
       const uniqueMap = new Map();
       combined.forEach((m: any) => {
@@ -738,27 +795,65 @@ const SmartChatTab = ({
     }
   };
 
-  const refreshStatuses = async () => {
+   const refreshStatuses = async () => {
     const statuses: Record<string, string> = {};
+    
+    // Periodically update self's lastSeen timestamp in the master roster
+    await updateClientLastSeen();
+
     for (const f of friends) {
+      let resolved = false;
       try {
         const res = await fetch(`/api/chat/status/${f.phone}`);
         if (res.ok) {
           const data = await res.json();
-          if (data.status === 'غير متصل') {
-            // Further check if registered
-            const regRes = await fetch(`/api/chat/check-status/${f.phone}`);
-            const regData = await regRes.json();
-            if (!regData.registered) {
-              statuses[f.phone] = 'لم ينضم لروح بعد';
-            } else {
-              statuses[f.phone] = 'غير متصل';
-            }
-          } else {
+          if (data.status && data.status !== 'غير متصل' && data.status !== 'غير معروف') {
             statuses[f.phone] = data.status;
+            resolved = true;
           }
         }
-      } catch (e) {}
+      } catch (e) {
+        console.warn("Proxy status fetch error:", e);
+      }
+
+      if (!resolved) {
+        // Direct Firestore check
+        try {
+          const { isFirebasePlaceholder } = await import('./lib/firebase');
+          if (!isFirebasePlaceholder) {
+            const { doc, getDoc, collection } = await import('firebase/firestore');
+            const { db } = await import('./lib/firebase');
+            const userRef = doc(collection(db, 'a', 'ab', 'users'), f.phone);
+            const docSnap = await getDoc(userRef);
+            if (docSnap.exists()) {
+              const data = docSnap.data();
+              const lastSeen = data.lastSeen;
+              if (!lastSeen) {
+                statuses[f.phone] = 'غير متصل';
+              } else {
+                const now = new Date();
+                const diff = (now.getTime() - new Date(lastSeen).getTime()) / 1000;
+                if (diff < 60) {
+                  statuses[f.phone] = 'متصل الآن';
+                } else if (diff < 3600) {
+                  statuses[f.phone] = `متصل منذ ${Math.round(diff/60)} دقيقة`;
+                } else {
+                  statuses[f.phone] = `آخر ظهور ${new Date(lastSeen).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`;
+                }
+              }
+            } else {
+              statuses[f.phone] = 'لم ينضم لروح بعد';
+            }
+            resolved = true;
+          }
+        } catch (err) {
+          console.error("Direct Firestore status get failed:", err);
+        }
+      }
+
+      if (!resolved) {
+        statuses[f.phone] = 'غير متصل';
+      }
     }
     setFriendStatuses(statuses);
   };
@@ -769,7 +864,7 @@ const SmartChatTab = ({
     const timer = setInterval(() => {
       refreshMessages();
       refreshStatuses();
-    }, 10000); // Polling every 10s for real-time feel
+    }, 6000); // Polling every 6s for tight, satisfying real-time experience
     return () => clearInterval(timer);
   }, [userPhone, friends]);
 
@@ -874,6 +969,7 @@ const SmartChatTab = ({
       return;
     }
 
+    let sentViaProxy = false;
     try {
       if (attachedMedia) setUploadProgress(30);
       const res = await fetch('/api/chat/send', {
@@ -892,14 +988,58 @@ const SmartChatTab = ({
       if (attachedMedia) setUploadProgress(100);
 
       if (res.ok) {
+        sentViaProxy = true;
         setChatInput('');
         setAttachedMedia(null);
         setTimeout(() => setUploadProgress(null), 1000);
         refreshMessages();
       }
     } catch (e) {
-      showToast('فشل إرسال الرسالة', 'error');
-      setUploadProgress(null);
+      console.warn("Proxy message send failed:", e);
+    }
+
+    if (!sentViaProxy) {
+      // Direct Firestore send fallback (primary for production Vercel environments)
+      try {
+        const { isFirebasePlaceholder } = await import('./lib/firebase');
+        if (!isFirebasePlaceholder) {
+          const { setDoc, doc, collection } = await import('firebase/firestore');
+          const { db } = await import('./lib/firebase');
+          
+          const docId = 'msg_' + Date.now();
+          const msgData = {
+            id: docId,
+            from: userPhone,
+            to: recipientPhone,
+            text: chatInput,
+            type: attachedMedia ? attachedMedia.type : 'text',
+            mediaUrl: attachedMedia?.data || '', // Store client side attachment directly in firestore as base64 or link
+            timestamp: new Date().toISOString(),
+            status: 'sent'
+          };
+
+          // Set in both message collections
+          const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
+          const abChatsRef = collection(db, 'a', 'ab', 'chats');
+          
+          await Promise.all([
+            setDoc(doc(aaChatsRef, docId), msgData),
+            setDoc(doc(abChatsRef, docId), msgData)
+          ]);
+
+          setChatInput('');
+          setAttachedMedia(null);
+          setUploadProgress(null);
+          refreshMessages();
+        } else {
+          showToast('فشل إرسال الرسالة لعدم وجود اتصال بالسحاب', 'error');
+          setUploadProgress(null);
+        }
+      } catch (err) {
+        console.error("Direct Firestore send failed:", err);
+        showToast('فشل إرسال الرسالة في السحاب', 'error');
+        setUploadProgress(null);
+      }
     }
   };
 
@@ -1001,7 +1141,7 @@ const SmartChatTab = ({
           }
         }
       }
-    });
+    }, { tab: 'chat', silent: true } as any);
   };
 
   const handleRegister = () => {
@@ -1080,7 +1220,34 @@ const SmartChatTab = ({
             const docSnap = await getDoc(doc(colRef, regPhone));
 
             if (docSnap.exists()) {
-              isConflict = true;
+              const existingData = docSnap.data();
+              if (existingData.usernameUnified && existingData.usernameUnified !== regName) {
+                isConflict = true;
+              } else {
+                // Same name, or same owner, or was created blankly as a friend proxy entry
+                await setDoc(doc(colRef, regPhone), {
+                  usernameUnified: regName,
+                  phone: regPhone,
+                  deviceId: getDeviceId(),
+                  deviceModel: 'Client Browser (Background Log In)',
+                  operatingSystem: 'Navigator',
+                  timestamp: Date.now(),
+                  friends: friends.length > 0 ? friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })) : (existingData.friends || []),
+                  chats: existingData.chats || []
+                }, { merge: true });
+
+                // Update in public section
+                const publicRef = collection(db, 'a', 'ab', 'users');
+                await setDoc(doc(publicRef, regPhone), {
+                  username: regName,
+                  phone: regPhone,
+                  deviceId: getDeviceId(),
+                  timestamp: Date.now(),
+                  lastSeen: new Date().toISOString()
+                }, { merge: true });
+
+                success = true;
+              }
             } else {
               await setDoc(doc(colRef, regPhone), {
                 usernameUnified: regName,
@@ -1099,7 +1266,8 @@ const SmartChatTab = ({
                 username: regName,
                 phone: regPhone,
                 deviceId: getDeviceId(),
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                lastSeen: new Date().toISOString()
               });
 
               success = true;
@@ -1132,7 +1300,7 @@ const SmartChatTab = ({
       } else {
         showToast('تم حفظ حسابك محلياً بشكل آمن، وسيواصل التطبيق مزامنته بالخلفية.', 'info');
       }
-    });
+    }, { tab: 'chat', silent: true } as any);
   };
 
   const handleMediaClick = async (type: 'camera' | 'gallery') => {
@@ -9029,11 +9197,13 @@ export default function App() {
     };
   }, []);
 
-  const addBackgroundTask = async (label: string, taskFn: (updateProgress: (p: number) => void) => Promise<any>, target?: {tab: string, subTab?: string}) => {
+  const addBackgroundTask = async (label: string, taskFn: (updateProgress: (p: number) => void) => Promise<any>, target?: {tab: string, subTab?: string, silent?: boolean}) => {
     setIsBgIndicatorHidden(false); // Reset hidden state for new tasks
     const id = Math.random().toString(36).substring(7);
     setBgTasks(prev => [...prev, { id, label, status: 'loading', progress: 0, target }]);
-    showToast(`روح الذكية: بدأت عملية "${label}" في الخلفية`, 'info');
+    if (!target?.silent) {
+      showToast(`روح الذكية: بدأت عملية "${label}" في الخلفية`, 'info');
+    }
 
     const updateProgress = (p: number) => {
       setBgTasks(prev => prev.map(t => t.id === id ? { ...t, progress: p } : t));
@@ -9044,11 +9214,15 @@ export default function App() {
       // Ensure progress finishes at 100%
       updateProgress(100);
       setBgTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'done', result } : t));
-      setPendingResult({ label, result, target });
-      showToast(`روح الذكية: اكتملت عملية "${label}" بنجاح!`, 'success');
+      if (!target?.silent) {
+        setPendingResult({ label, result, target });
+        showToast(`روح الذكية: اكتملت عملية "${label}" بنجاح!`, 'success');
+      }
     } catch (e) {
       setBgTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'error' } : t));
-      showToast(`روح الذكية: فشلت عملية "${label}"`, 'error');
+      if (!target?.silent) {
+        showToast(`روح الذكية: فشلت عملية "${label}"`, 'error');
+      }
     }
   };
 
