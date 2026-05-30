@@ -155,6 +155,13 @@ async function startServer() {
     try {
       const { phone } = req.params;
       const userPath = getChatPath(phone, false);
+      
+      // Check if user is registered on the server
+      const profilePath = path.join(userPath, 'profile.json');
+      if (!fs.existsSync(profilePath)) {
+        return res.json({ status: 'لم ينضم لروح بعد' });
+      }
+
       const lastSeenPath = path.join(userPath, 'last_seen.txt');
       if (fs.existsSync(lastSeenPath)) {
         const lastSeen = fs.readFileSync(lastSeenPath, 'utf8');
@@ -162,7 +169,7 @@ async function startServer() {
         const diff = (now.getTime() - new Date(lastSeen).getTime()) / 1000;
         if (diff < 60) return res.json({ status: 'متصل الآن' });
         if (diff < 3600) return res.json({ status: `متصل منذ ${Math.round(diff/60)} دقيقة` });
-        return res.json({ status: `متصل منذ ${new Date(lastSeen).toLocaleTimeString('ar-EG')}` });
+        return res.json({ status: `آخر ظهور ${new Date(lastSeen).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}` });
       }
       res.json({ status: 'غير متصل' });
     } catch (e) { res.json({ status: 'غير معروف' }); }

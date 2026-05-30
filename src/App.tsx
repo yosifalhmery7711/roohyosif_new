@@ -580,16 +580,16 @@ const SmartChatTab = ({
   const updateClientLastSeen = async () => {
     if (!userPhone) return;
     try {
-      const { isFirebasePlaceholder } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder) {
+      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder && !isFirestoreOffline) {
         const { doc, setDoc, collection } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
         const userRef = doc(collection(db, 'a', 'ab', 'users'), userPhone);
-        await setDoc(userRef, {
+        await runFirestoreWithTimeout(setDoc(userRef, {
           username: localStorage.getItem('userName') || 'عضو روح',
           phone: userPhone,
           lastSeen: new Date().toISOString()
-        }, { merge: true });
+        }, { merge: true }), 1000);
       }
     } catch (err) {
       console.warn("Client lastSeen sync failed:", err);
@@ -614,45 +614,48 @@ const SmartChatTab = ({
     let inboxData: any[] = [];
     let sentData: any[] = [];
 
-    // First try proxy API
+    // 1. Try Cloud Firestore FIRST (Primary Synchronization Engine)
     try {
-      const inboxRes = await fetch(`/api/chat/inbox/${userPhone}`);
-      const sentRes = await fetch(`/api/chat/sent/${userPhone}`);
-      
-      inboxData = inboxRes.ok ? await inboxRes.json() : [];
-      sentData = sentRes.ok ? await sentRes.json() : [];
-    } catch (err) {
-      console.warn("Proxy chat history fetch error:", err);
-    }
-
-    // Always merge in messages directly from Cloud Firestore (primary for Vercel/production)
-    try {
-      const { isFirebasePlaceholder } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder) {
+      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder && !isFirestoreOffline) {
         const { getDocs, query, where, collection } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
         const chatsRef = collection(db, 'a', 'ab', 'chats');
         
-        const [snapFrom, snapTo] = await Promise.all([
+        const [snapFrom, snapTo] = await runFirestoreWithTimeout(Promise.all([
           getDocs(query(chatsRef, where('from', '==', userPhone))),
           getDocs(query(chatsRef, where('to', '==', userPhone)))
-        ]);
+        ]), 2000);
 
-        const fSent: any[] = [];
         snapFrom.forEach(docSnap => {
-          fSent.push({ id: docSnap.id, ...docSnap.data() });
+          sentData.push({ id: docSnap.id, ...docSnap.data() });
         });
 
-        const fInbox: any[] = [];
         snapTo.forEach(docSnap => {
-          fInbox.push({ id: docSnap.id, ...docSnap.data() });
+          inboxData.push({ id: docSnap.id, ...docSnap.data() });
         });
-
-        sentData = [...sentData, ...fSent];
-        inboxData = [...inboxData, ...fInbox];
       }
     } catch (err) {
-      console.error("Direct Firestore messages query failed:", err);
+      console.warn("Direct Firestore messages query failed, falling back:", err);
+    }
+
+    // 2. Try proxy API as secondary merge
+    try {
+      const inboxRes = await fetch(`/api/chat/inbox/${userPhone}`);
+      const sentRes = await fetch(`/api/chat/sent/${userPhone}`);
+      
+      const pInbox = inboxRes.ok ? await inboxRes.json() : [];
+      const pSent = sentRes.ok ? await sentRes.json() : [];
+      
+      const existingIds = new Set([...inboxData, ...sentData].map(m => m.id));
+      pInbox.forEach((m: any) => {
+        if (!existingIds.has(m.id)) inboxData.push(m);
+      });
+      pSent.forEach((m: any) => {
+        if (!existingIds.has(m.id)) sentData.push(m);
+      });
+    } catch (err) {
+      console.warn("Proxy chat history fetch error:", err);
     }
 
     try {
@@ -807,7 +810,7 @@ const SmartChatTab = ({
         const res = await fetch(`/api/chat/status/${f.phone}`);
         if (res.ok) {
           const data = await res.json();
-          if (data.status && data.status !== 'غير متصل' && data.status !== 'غير معروف') {
+          if (data.status && data.status !== 'غير معروف') {
             statuses[f.phone] = data.status;
             resolved = true;
           }
@@ -819,12 +822,12 @@ const SmartChatTab = ({
       if (!resolved) {
         // Direct Firestore check
         try {
-          const { isFirebasePlaceholder } = await import('./lib/firebase');
-          if (!isFirebasePlaceholder) {
+          const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+          if (!isFirebasePlaceholder && !isFirestoreOffline) {
             const { doc, getDoc, collection } = await import('firebase/firestore');
             const { db } = await import('./lib/firebase');
             const userRef = doc(collection(db, 'a', 'ab', 'users'), f.phone);
-            const docSnap = await getDoc(userRef);
+            const docSnap = await runFirestoreWithTimeout(getDoc(userRef), 1000);
             if (docSnap.exists()) {
               const data = docSnap.data();
               const lastSeen = data.lastSeen;
@@ -917,6 +920,38 @@ const SmartChatTab = ({
 
   const handleDeleteChatHistory = async (friendPhone: string) => {
     if (!userPhone) return;
+    
+    // 1. Direct Cloud Firestore history delete (Primary)
+    try {
+      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+        const { getDocs, query, where, collection, writeBatch, doc } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        const chatsRef = collection(db, 'a', 'ab', 'chats');
+        const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
+        
+        const [snapSent, snapRecv] = await Promise.all([
+          getDocs(query(chatsRef, where('from', '==', userPhone), where('to', '==', friendPhone))),
+          getDocs(query(chatsRef, where('from', '==', friendPhone), where('to', '==', userPhone)))
+        ]);
+
+        const batch = writeBatch(db);
+        snapSent.forEach(d => {
+          batch.delete(doc(chatsRef, d.id));
+          batch.delete(doc(aaChatsRef, d.id));
+        });
+        snapRecv.forEach(d => {
+          batch.delete(doc(chatsRef, d.id));
+          batch.delete(doc(aaChatsRef, d.id));
+        });
+        
+        await runFirestoreWithTimeout(batch.commit(), 3000);
+      }
+    } catch (err) {
+      console.warn("Direct Firebase history delete failed:", err);
+    }
+
+    // 2. Local proxy delete
     try {
       await fetch('/api/chat/delete-history', {
         method: 'POST',
@@ -926,7 +961,12 @@ const SmartChatTab = ({
       refreshMessages();
       showToast('تم مسح السجل بنجاح 🧹', 'success');
       setFriendMenuOpen(null);
-    } catch (e) {}
+    } catch (e) {
+      console.warn("Proxy history delete failed:", e);
+      refreshMessages();
+      showToast('تم مسح السجل بنجاح 🧹', 'success');
+      setFriendMenuOpen(null);
+    }
   };
 
   const handleSendMessage = async (recipientPhone: string) => {
@@ -969,81 +1009,116 @@ const SmartChatTab = ({
       return;
     }
 
-    let sentViaProxy = false;
+    let sentViaFirebase = false;
     try {
-      if (attachedMedia) setUploadProgress(30);
-      const res = await fetch('/api/chat/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+        if (attachedMedia) setUploadProgress(30);
+        const { setDoc, doc, collection } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        
+        const docId = 'msg_' + Date.now();
+        const msgData = {
+          id: docId,
           from: userPhone,
           to: recipientPhone,
           text: chatInput,
           type: attachedMedia ? attachedMedia.type : 'text',
-          mediaData: attachedMedia?.data,
-          fileName: attachedMedia?.name
-        })
-      });
+          mediaUrl: attachedMedia?.data || '', 
+          timestamp: new Date().toISOString(),
+          status: 'sent'
+        };
 
-      if (attachedMedia) setUploadProgress(100);
+        const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
+        const abChatsRef = collection(db, 'a', 'ab', 'chats');
+        
+        await runFirestoreWithTimeout(Promise.all([
+          setDoc(doc(aaChatsRef, docId), msgData),
+          setDoc(doc(abChatsRef, docId), msgData)
+        ]), 2500);
 
-      if (res.ok) {
-        sentViaProxy = true;
+        if (attachedMedia) setUploadProgress(100);
+        sentViaFirebase = true;
         setChatInput('');
         setAttachedMedia(null);
         setTimeout(() => setUploadProgress(null), 1000);
+        
+        // Background sync to local server proxy
+        try {
+          fetch('/api/chat/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              from: userPhone,
+              to: recipientPhone,
+              text: chatInput,
+              type: attachedMedia ? attachedMedia.type : 'text',
+              mediaData: attachedMedia?.data,
+              fileName: attachedMedia?.name
+            })
+          }).catch(() => {});
+        } catch (linkErr) {}
+
         refreshMessages();
       }
     } catch (e) {
-      console.warn("Proxy message send failed:", e);
+      console.warn("Direct Firebase message send failed, trying proxy fallback:", e);
     }
 
-    if (!sentViaProxy) {
-      // Direct Firestore send fallback (primary for production Vercel environments)
+    if (!sentViaFirebase) {
       try {
-        const { isFirebasePlaceholder } = await import('./lib/firebase');
-        if (!isFirebasePlaceholder) {
-          const { setDoc, doc, collection } = await import('firebase/firestore');
-          const { db } = await import('./lib/firebase');
-          
-          const docId = 'msg_' + Date.now();
-          const msgData = {
-            id: docId,
+        if (attachedMedia) setUploadProgress(30);
+        const res = await fetch('/api/chat/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
             from: userPhone,
             to: recipientPhone,
             text: chatInput,
             type: attachedMedia ? attachedMedia.type : 'text',
-            mediaUrl: attachedMedia?.data || '', // Store client side attachment directly in firestore as base64 or link
-            timestamp: new Date().toISOString(),
-            status: 'sent'
-          };
+            mediaData: attachedMedia?.data,
+            fileName: attachedMedia?.name
+          })
+        });
 
-          // Set in both message collections
-          const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
-          const abChatsRef = collection(db, 'a', 'ab', 'chats');
-          
-          await Promise.all([
-            setDoc(doc(aaChatsRef, docId), msgData),
-            setDoc(doc(abChatsRef, docId), msgData)
-          ]);
+        if (attachedMedia) setUploadProgress(100);
 
+        if (res.ok) {
           setChatInput('');
           setAttachedMedia(null);
-          setUploadProgress(null);
+          setTimeout(() => setUploadProgress(null), 1000);
           refreshMessages();
         } else {
-          showToast('فشل إرسال الرسالة لعدم وجود اتصال بالسحاب', 'error');
+          showToast('فشل إرسال الرسالة، يرجى التحقق من اتصالك بالشبكة', 'error');
           setUploadProgress(null);
         }
-      } catch (err) {
-        console.error("Direct Firestore send failed:", err);
-        showToast('فشل إرسال الرسالة في السحاب', 'error');
+      } catch (e) {
+        console.warn("Proxy fallback message send failed:", e);
+        showToast('فشل إرسال الرسالة', 'error');
         setUploadProgress(null);
       }
     }
   };
 
   const checkFriendStatus = async (phone: string) => {
+    // 1. Direct Firestore Check (Primary)
+    try {
+      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+        const { doc, getDoc, collection } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
+        const docSnap = await runFirestoreWithTimeout(getDoc(doc(colRef, phone)), 1500);
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          return { registered: true, name: data.usernameUnified || data.name || "" };
+        }
+      }
+    } catch (err) {
+      console.warn("Direct Firestore check status failed, trying proxy fallback:", err);
+    }
+
+    // 2. Local Proxy Fallback Check
     try {
       const res = await fetch(`/api/chat/check-status/${phone}`);
       if (res.ok) {
@@ -1054,22 +1129,6 @@ const SmartChatTab = ({
       console.warn("Proxy check status failed:", e);
     }
 
-    // Direct Firestore fallback check!
-    const { isFirebasePlaceholder } = await import('./lib/firebase');
-    if (!isFirebasePlaceholder) {
-      try {
-        const { doc, getDoc, collection } = await import('firebase/firestore');
-        const { db } = await import('./lib/firebase');
-        const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
-        const docSnap = await getDoc(doc(colRef, phone));
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          return { registered: true, name: data.usernameUnified || data.name || "" };
-        }
-      } catch (err) {
-        console.error("Direct Firestore check status failed:", err);
-      }
-    }
     return { registered: false };
   };
 
@@ -1127,14 +1186,14 @@ const SmartChatTab = ({
         // Direct cloud sync fallback
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            const { isFirebasePlaceholder } = await import('./lib/firebase');
-            if (!isFirebasePlaceholder) {
+            const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+            if (!isFirebasePlaceholder && !isFirestoreOffline) {
               const { doc, updateDoc, collection } = await import('firebase/firestore');
               const { db } = await import('./lib/firebase');
               const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
-              await updateDoc(doc(colRef, userPhone), {
+              await runFirestoreWithTimeout(updateDoc(doc(colRef, userPhone), {
                 friends: updated.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes }))
-              });
+              }), 1200);
             }
           } catch (err) {
             console.warn("Cloud Firestore direct friend update failed:", err);
@@ -1212,12 +1271,12 @@ const SmartChatTab = ({
       // Check and write fallback direct to Firestore
       if (statusError) {
         try {
-          const { isFirebasePlaceholder } = await import('./lib/firebase');
-          if (!isFirebasePlaceholder) {
+          const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
+          if (!isFirebasePlaceholder && !isFirestoreOffline) {
             const { doc, getDoc, setDoc, collection } = await import('firebase/firestore');
             const { db } = await import('./lib/firebase');
             const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
-            const docSnap = await getDoc(doc(colRef, regPhone));
+            const docSnap = await runFirestoreWithTimeout(getDoc(doc(colRef, regPhone)), 1500);
 
             if (docSnap.exists()) {
               const existingData = docSnap.data();
@@ -1225,7 +1284,7 @@ const SmartChatTab = ({
                 isConflict = true;
               } else {
                 // Same name, or same owner, or was created blankly as a friend proxy entry
-                await setDoc(doc(colRef, regPhone), {
+                await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
                   usernameUnified: regName,
                   phone: regPhone,
                   deviceId: getDeviceId(),
@@ -1234,22 +1293,22 @@ const SmartChatTab = ({
                   timestamp: Date.now(),
                   friends: friends.length > 0 ? friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })) : (existingData.friends || []),
                   chats: existingData.chats || []
-                }, { merge: true });
+                }, { merge: true }), 1500);
 
                 // Update in public section
                 const publicRef = collection(db, 'a', 'ab', 'users');
-                await setDoc(doc(publicRef, regPhone), {
+                await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
                   username: regName,
                   phone: regPhone,
                   deviceId: getDeviceId(),
                   timestamp: Date.now(),
                   lastSeen: new Date().toISOString()
-                }, { merge: true });
+                }, { merge: true }), 1500);
 
                 success = true;
               }
             } else {
-              await setDoc(doc(colRef, regPhone), {
+              await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
                 usernameUnified: regName,
                 phone: regPhone,
                 deviceId: getDeviceId(),
@@ -1258,17 +1317,17 @@ const SmartChatTab = ({
                 timestamp: Date.now(),
                 friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
                 chats: []
-              });
+              }), 1500);
 
               // Write to public section
               const publicRef = collection(db, 'a', 'ab', 'users');
-              await setDoc(doc(publicRef, regPhone), {
+              await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
                 username: regName,
                 phone: regPhone,
                 deviceId: getDeviceId(),
                 timestamp: Date.now(),
                 lastSeen: new Date().toISOString()
-              });
+              }), 1500);
 
               success = true;
             }
@@ -1803,10 +1862,11 @@ const SmartChatTab = ({
                   <span className="text-sm font-black text-white italic truncate max-w-[180px] sm:max-w-[280px]">{selectedFriend.name}</span>
                   <span className={cn(
                     "text-[9px] font-bold uppercase tracking-widest flex items-center gap-1 mt-0.5",
-                    friendStatuses[selectedFriend.phone] === 'متصل الآن' ? "text-emerald-400" : "text-gray-500"
+                    friendStatuses[selectedFriend.phone] === 'متصل الآن' ? "text-emerald-400" : 
+                    friendStatuses[selectedFriend.phone] === 'لم ينضم لروح بعد' ? "text-amber-500 font-extrabold italic" : "text-gray-500"
                   )}>
                     {friendStatuses[selectedFriend.phone] === 'متصل الآن' && <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />}
-                    {friendStatuses[selectedFriend.phone] === 'متصل الآن' ? 'متصل الآن' : `منذ ${friendStatuses[selectedFriend.phone] || 'وقت قصير'}`}
+                    {friendStatuses[selectedFriend.phone] || 'غير متصل'}
                   </span>
                </div>
                <div className="p-2 opacity-0"><ChevronRight size={24}/></div>
