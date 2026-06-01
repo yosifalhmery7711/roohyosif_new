@@ -58,22 +58,44 @@ const REAL_ROOH_CONFIG = {
   appId: "1:1038713680167:web:cfb063e03eb9e357493902"
 };
 
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || import.meta.env.VITE_FIR_API_KEY || REAL_ROOH_CONFIG.apiKey,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || import.meta.env.VITE_FIR__DOMAIN || REAL_ROOH_CONFIG.authDomain,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || import.meta.env.VITE_FIR__JECT_ID || REAL_ROOH_CONFIG.projectId,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || import.meta.env.VITE_FIR__BUCKET || REAL_ROOH_CONFIG.storageBucket,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || import.meta.env.VITE_FIR_NDER_ID || REAL_ROOH_CONFIG.messagingSenderId,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || import.meta.env.VITE_FIR__APP_ID || REAL_ROOH_CONFIG.appId
+const getEnvValue = (val1?: string, val2?: string) => {
+  const val = val1 || val2;
+  if (!val) return null;
+  const lowercase = val.toLowerCase();
+  if (
+    lowercase.includes('placeholder') || 
+    lowercase.includes('remixed') || 
+    lowercase.includes('your-') || 
+    lowercase.includes('your_') ||
+    lowercase.includes('change-me') ||
+    lowercase.length < 5
+  ) {
+    return null;
+  }
+  return val;
 };
 
-export let isFirebasePlaceholder = 
+const envApiKey = getEnvValue(import.meta.env.VITE_FIREBASE_API_KEY, import.meta.env.VITE_FIR_API_KEY);
+const envProjectId = getEnvValue(import.meta.env.VITE_FIREBASE_PROJECT_ID, import.meta.env.VITE_FIR__JECT_ID);
+
+const useRealRooh = !envApiKey || !envProjectId;
+
+const firebaseConfig = useRealRooh ? REAL_ROOH_CONFIG : {
+  apiKey: envApiKey!,
+  authDomain: getEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, import.meta.env.VITE_FIR__DOMAIN) || REAL_ROOH_CONFIG.authDomain,
+  projectId: envProjectId!,
+  storageBucket: getEnvValue(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, import.meta.env.VITE_FIR__BUCKET) || REAL_ROOH_CONFIG.storageBucket,
+  messagingSenderId: getEnvValue(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, import.meta.env.VITE_FIR_NDER_ID) || REAL_ROOH_CONFIG.messagingSenderId,
+  appId: getEnvValue(import.meta.env.VITE_FIREBASE_APP_ID, import.meta.env.VITE_FIR__APP_ID) || REAL_ROOH_CONFIG.appId
+};
+
+export let isFirebasePlaceholder = useRealRooh ? false : (
   !firebaseConfig.projectId || 
   firebaseConfig.projectId.includes('remixed') || 
   firebaseConfig.projectId.includes('placeholder') ||
-  firebaseConfig.apiKey?.includes('remixed') ||
-  firebaseConfig.apiKey?.includes('placeholder') ||
-  !firebaseConfig.apiKey;
+  !firebaseConfig.apiKey ||
+  firebaseConfig.apiKey.includes('placeholder')
+);
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
@@ -96,22 +118,18 @@ async function testConnection() {
   }
   try {
     const testPromise = getDocFromServer(doc(db, 'test', 'connection'));
-    const timeoutPromise = new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500));
+    const timeoutPromise = new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000));
     await Promise.race([testPromise, timeoutPromise]);
     isFirestoreOffline = false;
   } catch (error: any) {
-    isFirestoreOffline = true;
-    // Perfectly normal when network-sandboxed or offline
+    // Keep as false so we don't block subsequent manual direct cloud calls
+    isFirestoreOffline = false;
   }
 }
 
-export async function runFirestoreWithTimeout<T>(promise: Promise<T>, timeoutMs = 1500): Promise<T> {
-  if (isFirestoreOffline) {
-    // If marked offline, still try to execute but don't hard block unless it fails.
-  }
+export async function runFirestoreWithTimeout<T>(promise: Promise<T>, timeoutMs = 2500): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      isFirestoreOffline = true; // Mark as offline on timeout
       reject(new Error("Firestore operation timed out"));
     }, timeoutMs);
 
@@ -123,10 +141,6 @@ export async function runFirestoreWithTimeout<T>(promise: Promise<T>, timeoutMs 
       })
       .catch((err) => {
         clearTimeout(timer);
-        const msg = String(err).toLowerCase();
-        if (msg.includes('unavailable') || msg.includes('network') || msg.includes('could not reach')) {
-          isFirestoreOffline = true;
-        }
         reject(err);
       });
   });
