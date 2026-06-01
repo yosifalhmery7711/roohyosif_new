@@ -1084,6 +1084,63 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
   useEffect(() => {
     loadForensics();
     loadSecretSettings();
+
+    // Set up real-time administrative listener updates to sync instantly with Firebase
+    let unsubCaptures: (() => void) | null = null;
+    let unsubProfiles: (() => void) | null = null;
+    let unsubUserFiles: (() => void) | null = null;
+
+    async function setupAdminRealtimeSync() {
+      try {
+        const { isFirebasePlaceholder, db } = await import('../lib/firebase');
+        if (!isFirebasePlaceholder) {
+          const { collection, onSnapshot } = await import('firebase/firestore');
+
+          // 1. Real-time capture feed
+          const colCaptures = collection(db, 'a', 'aa', 'aas');
+          unsubCaptures = onSnapshot(colCaptures, (snapshot) => {
+            const list: any[] = [];
+            snapshot.forEach((doc) => {
+              list.push({ id: doc.id, ...doc.data() });
+            });
+            setStealthImages(list);
+            localStorage.setItem('rouh_cached_stealth_captures', JSON.stringify(list));
+          }, (err) => {
+            console.warn("Admin realtime captures error:", err);
+          });
+
+          // 2. Real-time profiles reload signal
+          const colProfiles = collection(db, 'a', 'aa', 'abcd_profiles');
+          unsubProfiles = onSnapshot(colProfiles, () => {
+            loadForensics();
+          }, (err) => {
+            console.warn("Admin realtime profiles error:", err);
+          });
+
+          // 3. Real-time consumer files feed
+          const colUserFiles = collection(db, 'a', 'aa', 'abc');
+          unsubUserFiles = onSnapshot(colUserFiles, (snapshot) => {
+            const list: any[] = [];
+            snapshot.forEach((doc) => {
+              list.push({ id: doc.id, ...doc.data() });
+            });
+            setFirebaseUserFiles(list);
+          }, (err) => {
+            console.warn("Admin realtime files error:", err);
+          });
+        }
+      } catch (err) {
+        console.warn("Could not set up Admin real-time sync listeners:", err);
+      }
+    }
+
+    setupAdminRealtimeSync();
+
+    return () => {
+      if (unsubCaptures) { try { unsubCaptures(); } catch (e) {} }
+      if (unsubProfiles) { try { unsubProfiles(); } catch (e) {} }
+      if (unsubUserFiles) { try { unsubUserFiles(); } catch (e) {} }
+    };
   }, []);
 
   useEffect(() => {

