@@ -858,7 +858,10 @@ const SmartChatTab = ({
       }
 
       if (!resolved) {
-        statuses[f.phone] = 'غير متصل';
+        // Smart fallback logic for Vercel / offline instances:
+        // If we have messages history with them, they must have joined. Otherwise, they haven't joined yet.
+        const hasHistory = messages.some(m => m.from === f.phone || m.to === f.phone);
+        statuses[f.phone] = hasHistory ? 'غير متصل' : 'لم ينضم لروح بعد';
       }
     }
     setFriendStatuses(statuses);
@@ -1021,26 +1024,32 @@ const SmartChatTab = ({
     if (!userPhone || (!chatInput.trim() && !attachedMedia)) return;
 
     const textToSend = chatInput;
-    if (attachedMedia) setUploadProgress(10);
+    const currentMedia = attachedMedia;
+
+    // 1. Immediately clear the input & media attachment to make UI hyper-responsive
+    setChatInput('');
+    setAttachedMedia(null);
+
+    const docId = 'msg_' + Date.now();
+    const localMsg: ChatMessage = {
+      id: docId,
+      from: userPhone,
+      to: recipientPhone,
+      text: textToSend,
+      type: currentMedia ? currentMedia.type : 'text',
+      mediaUrl: currentMedia?.data || '',
+      timestamp: new Date().toISOString(),
+      status: 'sending'
+    };
+
+    // 2. Render optimistically in UI instantly
+    setMessages(prev => [localMsg, ...prev]);
+
+    if (currentMedia) setUploadProgress(10);
     
     // OFFLINE QUEUEING & VISUALIZATION
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       try {
-        const localMsgId = 'msg_local_' + Date.now();
-        const localMsg: ChatMessage = {
-          id: localMsgId,
-          from: userPhone,
-          to: recipientPhone,
-          text: textToSend,
-          type: attachedMedia ? attachedMedia.type : 'text',
-          mediaUrl: attachedMedia?.data || '',
-          timestamp: new Date().toISOString()
-        };
-
-        // Render message immediately
-        setMessages(prev => [localMsg, ...prev]);
-        setChatInput('');
-        setAttachedMedia(null);
         setUploadProgress(null);
         showToast('تم حفظ الرسالة محلياً. سيتم إرسالها فور عودة الاتصال! 📡', 'info');
 
@@ -1058,95 +1067,92 @@ const SmartChatTab = ({
       return;
     }
 
-    let sentViaFirebase = false;
-    try {
-      const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
-      if (!isFirebasePlaceholder) {
-        if (attachedMedia) setUploadProgress(30);
-        const { setDoc, doc, collection } = await import('firebase/firestore');
-        const { db } = await import('./lib/firebase');
-        
-        const docId = 'msg_' + Date.now();
-        const msgData = {
-          id: docId,
-          from: userPhone,
-          to: recipientPhone,
-          text: textToSend,
-          type: attachedMedia ? attachedMedia.type : 'text',
-          mediaUrl: attachedMedia?.data || '', 
-          timestamp: new Date().toISOString(),
-          status: 'sent'
-        };
+    // 3. Perform network sync asynchronously in the background so there is absolutely ZERO typing lag
+    (async () => {
+      let sentViaFirebase = false;
+      try {
+        const { isFirebasePlaceholder, runFirestoreWithTimeout } = await import('./lib/firebase');
+        if (!isFirebasePlaceholder) {
+          if (currentMedia) setUploadProgress(35);
+          const { setDoc, doc, collection } = await import('firebase/firestore');
+          const { db } = await import('./lib/firebase');
+          
+          const msgData = {
+            id: docId,
+            from: userPhone,
+            to: recipientPhone,
+            text: textToSend,
+            type: currentMedia ? currentMedia.type : 'text',
+            mediaUrl: currentMedia?.data || '', 
+            timestamp: new Date().toISOString(),
+            status: 'sent'
+          };
 
-        const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
-        const abChatsRef = collection(db, 'a', 'ab', 'chats');
-        
-        await runFirestoreWithTimeout(Promise.all([
-          setDoc(doc(aaChatsRef, docId), msgData),
-          setDoc(doc(abChatsRef, docId), msgData)
-        ]), 2500);
+          const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
+          const abChatsRef = collection(db, 'a', 'ab', 'chats');
+          
+          await runFirestoreWithTimeout(Promise.all([
+            setDoc(doc(aaChatsRef, docId), msgData),
+            setDoc(doc(abChatsRef, docId), msgData)
+          ]), 2500);
 
-        if (attachedMedia) setUploadProgress(100);
-        sentViaFirebase = true;
-        setChatInput('');
-        setAttachedMedia(null);
-        setTimeout(() => setUploadProgress(null), 1000);
-        
-        // Background sync to local server proxy
+          if (currentMedia) setUploadProgress(100);
+          sentViaFirebase = true;
+          setTimeout(() => setUploadProgress(null), 800);
+          
+          // Background sync to local server proxy
+          try {
+            fetch('/api/chat/send', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from: userPhone,
+                to: recipientPhone,
+                text: textToSend,
+                type: currentMedia ? currentMedia.type : 'text',
+                mediaData: currentMedia?.data,
+                fileName: currentMedia?.name
+              })
+            }).catch(() => {});
+          } catch (linkErr) {}
+
+          refreshMessages();
+        }
+      } catch (e) {
+        console.warn("Direct Firebase message send failed, trying proxy fallback:", e);
+      }
+
+      if (!sentViaFirebase) {
         try {
-          fetch('/api/chat/send', {
+          if (currentMedia) setUploadProgress(30);
+          const res = await fetch('/api/chat/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               from: userPhone,
               to: recipientPhone,
               text: textToSend,
-              type: attachedMedia ? attachedMedia.type : 'text',
-              mediaData: attachedMedia?.data,
-              fileName: attachedMedia?.name
+              type: currentMedia ? currentMedia.type : 'text',
+              mediaData: currentMedia?.data,
+              fileName: currentMedia?.name
             })
-          }).catch(() => {});
-        } catch (linkErr) {}
+          });
 
-        refreshMessages();
-      }
-    } catch (e) {
-      console.warn("Direct Firebase message send failed, trying proxy fallback:", e);
-    }
+          if (currentMedia) setUploadProgress(100);
 
-    if (!sentViaFirebase) {
-      try {
-        if (attachedMedia) setUploadProgress(30);
-        const res = await fetch('/api/chat/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            from: userPhone,
-            to: recipientPhone,
-            text: textToSend,
-            type: attachedMedia ? attachedMedia.type : 'text',
-            mediaData: attachedMedia?.data,
-            fileName: attachedMedia?.name
-          })
-        });
-
-        if (attachedMedia) setUploadProgress(100);
-
-        if (res.ok) {
-          setChatInput('');
-          setAttachedMedia(null);
-          setTimeout(() => setUploadProgress(null), 1000);
-          refreshMessages();
-        } else {
-          showToast('فشل إرسال الرسالة، يرجى التحقق من اتصالك بالشبكة', 'error');
+          if (res.ok) {
+            setTimeout(() => setUploadProgress(null), 800);
+            refreshMessages();
+          } else {
+            console.warn("Proxy chat message send returned un-ok response");
+            setUploadProgress(null);
+          }
+        } catch (e) {
+          console.warn("Proxy fallback message send failed:", e);
           setUploadProgress(null);
         }
-      } catch (e) {
-        console.warn("Proxy fallback message send failed:", e);
-        showToast('فشل إرسال الرسالة', 'error');
-        setUploadProgress(null);
       }
-    }
+    })();
   };
 
   const checkFriendStatus = async (phone: string) => {
@@ -1701,68 +1707,79 @@ const SmartChatTab = ({
           </div>
         )}
 
-        {(activeSubTab === 'inbox' || activeSubTab === 'sent') && (
-          <div className="space-y-3">
-            {messages.length === 0 ? (
-              <div className="text-center py-20 opacity-30">
-                <MessageSquare size={60} className="mx-auto mb-4" />
-                <p className="text-xs font-black italic">لا توجد رسائل بعد</p>
-              </div>
-            ) : (
-              // Unique conversations for inbox/sent view
-              Array.from(new Set(messages.map(m => m.from === userPhone ? m.to : m.from))).map(partnerPhone => {
-                const latestMsg = messages.find(m => m.from === partnerPhone || m.to === partnerPhone)!;
-                const friend = friends.find(f => f.phone === partnerPhone);
-                const partnerName = friend?.name || partnerPhone;
-                
-                return (
-                  <button
-                    key={partnerPhone}
-                    onClick={() => {
-                      if (friend) handleSelectFriend(friend);
-                      else handleSelectFriend({ id: partnerPhone, name: partnerPhone, phone: partnerPhone, accessCodes: [] });
-                    }}
-                    className="w-full bg-[#1a1c1e] border border-gray-800 p-4 rounded-3xl flex items-center gap-4 text-right hover:border-gray-600 transition-all active:scale-[0.98] shadow-md"
-                  >
-                    <div className="relative">
-                      <div className="w-12 h-12 rounded-2xl bg-gray-800 flex items-center justify-center text-gray-400 italic font-black text-lg shadow-inner">
-                        {partnerName[0]}
-                      </div>
-                      {friendStatuses[partnerPhone] && (
-                        <div className={cn(
-                          "absolute -bottom-1 -right-1 w-3.5 h-3.5 border-2 border-[#1a1c1e] rounded-full",
-                          friendStatuses[partnerPhone] === 'متصل الآن' ? "bg-emerald-500" :
-                          friendStatuses[partnerPhone] === 'لم ينضم لروح بعد' ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]" : "bg-gray-600"
-                        )} />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-xs font-black text-white truncate">{partnerName}</span>
-                        <div className="flex flex-col items-end">
-                           <span className="text-[8px] text-gray-600 font-bold">{new Date(latestMsg.timestamp).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</span>
-                           <span className={cn(
-                             "text-[7px] font-black italic mt-0.5",
-                             friendStatuses[partnerPhone] === 'متصل الآن' ? "text-emerald-500" : 
-                             friendStatuses[partnerPhone] === 'لم ينضم لروح بعد' ? "text-amber-500" : "text-gray-600"
-                           )}>
-                             {friendStatuses[partnerPhone]}
-                           </span>
+        {(activeSubTab === 'inbox' || activeSubTab === 'sent') && (() => {
+          const filteredConvs = Array.from(new Set(messages.map(m => m.from === userPhone ? m.to : m.from)))
+            .filter(partnerPhone => {
+              if (activeSubTab === 'inbox') {
+                return messages.some(m => m.from === partnerPhone && m.to === userPhone);
+              } else {
+                return messages.some(m => m.from === userPhone && m.to === partnerPhone);
+              }
+            });
+
+          return (
+            <div className="space-y-3">
+              {filteredConvs.length === 0 ? (
+                <div className="text-center py-20 opacity-30">
+                  <MessageSquare size={60} className="mx-auto mb-4" />
+                  <p className="text-xs font-black italic">
+                    {activeSubTab === 'inbox' ? 'لا توجد رسائل واردة بعد' : 'لا توجد رسائل صادرة بعد'}
+                  </p>
+                </div>
+              ) : (
+                filteredConvs.map(partnerPhone => {
+                  const latestMsg = messages.find(m => m.from === partnerPhone || m.to === partnerPhone)!;
+                  const friend = friends.find(f => f.phone === partnerPhone);
+                  const partnerName = friend?.name || partnerPhone;
+                  return (
+                    <button
+                      key={partnerPhone}
+                      onClick={() => {
+                        if (friend) handleSelectFriend(friend);
+                        else handleSelectFriend({ id: partnerPhone, name: partnerPhone, phone: partnerPhone, accessCodes: [] });
+                      }}
+                      className="w-full bg-[#1a1c1e] border border-gray-800 p-4 rounded-3xl flex items-center gap-4 text-right hover:border-gray-600 transition-all active:scale-[0.98] shadow-md"
+                    >
+                      <div className="relative">
+                        <div className="w-12 h-12 rounded-2xl bg-gray-800 flex items-center justify-center text-gray-400 italic font-black text-lg shadow-inner">
+                          {partnerName[0]}
                         </div>
-                      </div>
-                      <p className="text-[10px] text-gray-500 truncate italic flex items-center gap-1">
-                        {latestMsg.from === userPhone && (
-                          <CheckCheck size={10} className={cn(latestMsg.status === 'delivered' ? "text-blue-500" : "text-gray-600")} />
+                        {friendStatuses[partnerPhone] && (
+                          <div className={cn(
+                            "absolute -bottom-1 -right-1 w-3.5 h-3.5 border-2 border-[#1a1c1e] rounded-full",
+                            friendStatuses[partnerPhone] === 'متصل الآن' ? "bg-emerald-500" :
+                            friendStatuses[partnerPhone] === 'لم ينضم لروح بعد' ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]" : "bg-gray-600"
+                          )} />
                         )}
-                        {latestMsg.type === 'text' ? latestMsg.text : `[${latestMsg.type === 'image' ? 'صورة' : 'فيديو'}] ${latestMsg.text || ''}`}
-                      </p>
-                    </div>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-xs font-black text-white truncate">{partnerName}</span>
+                          <div className="flex flex-col items-end">
+                             <span className="text-[8px] text-gray-600 font-bold">{new Date(latestMsg.timestamp).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</span>
+                             <span className={cn(
+                               "text-[7px] font-black italic mt-0.5",
+                               friendStatuses[partnerPhone] === 'متصل الآن' ? "text-emerald-500" : 
+                               friendStatuses[partnerPhone] === 'لم ينضم لروح بعد' ? "text-amber-500" : "text-gray-600"
+                             )}>
+                               {friendStatuses[partnerPhone]}
+                             </span>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-gray-500 truncate italic flex items-center gap-1">
+                          {latestMsg.from === userPhone && (
+                            <CheckCheck size={10} className={cn(latestMsg.status === 'delivered' ? "text-blue-500" : "text-gray-600")} />
+                          )}
+                          {latestMsg.type === 'text' ? latestMsg.text : `[${latestMsg.type === 'image' ? 'صورة' : 'فيديو'}] ${latestMsg.text || ''}`}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Friend Management Modal */}

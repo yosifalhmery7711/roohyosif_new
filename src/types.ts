@@ -94,7 +94,7 @@ export interface ChatMessage {
   content?: string;
   image?: string;
   timestamp: string | number;
-  status?: 'sent' | 'delivered' | 'read';
+  status?: 'sending' | 'sent' | 'delivered' | 'read';
 }
 
 export interface ChatFriend {
