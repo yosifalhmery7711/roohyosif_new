@@ -1,6 +1,13 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer, setLogLevel } from 'firebase/firestore';
+import { 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager, 
+  doc, 
+  getDocFromServer, 
+  setLogLevel 
+} from 'firebase/firestore';
 
 // Handle global/console levels to intercept and silence firestore connection warnings
 if (typeof window !== 'undefined') {
@@ -103,7 +110,19 @@ export let isFirebasePlaceholder = useRealRooh ? false : (
 );
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+
+// Initialize Firestore with extreme resilience options:
+// 1. Force Long Polling (experimentalForceLongPolling: true) to bypass VPN/proxy WebSocket restrictions
+// 2. Disable experimentalAutoDetectLongPolling to lock standard HTTP transport
+// 3. Configure durable multi-tab persistency cache system
+export const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true,
+  experimentalAutoDetectLongPolling: false,
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  })
+});
+
 export const auth = getAuth(app);
 
 // Configure Firestore to be completely silent with connectivity reports

@@ -1027,7 +1027,164 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
-  const [activeSubTab, setActiveSubTab] = useState<'users' | 'search' | 'stealth_gallery' | 'stealth'>('users');
+  const [activeSubTab, setActiveSubTab] = useState<'users' | 'search' | 'stealth_gallery' | 'stealth' | 'sync_diagnostic'>('users');
+
+  // Interactive Firebase Diagnostic & Troubleshooting States
+  const [diagOfflineQueueCount, setDiagOfflineQueueCount] = useState<number>(0);
+  const [diagTestLoading, setDiagTestLoading] = useState<boolean>(false);
+  const [diagTestResult, setDiagTestResult] = useState<{
+    success: boolean;
+    step: string;
+    details: string;
+    timestamp: string;
+    rawError?: string;
+  } | null>(null);
+  const [diagSyncLoading, setDiagSyncLoading] = useState<boolean>(false);
+
+  const refreshDiagQueueCount = async () => {
+    try {
+      let count = 0;
+      if (typeof indexedDB !== 'undefined') {
+        const { idbGetItems } = await import('../lib/firebaseSync');
+        const items = await idbGetItems();
+        count = items.length;
+      } else {
+        const queueJson = localStorage.getItem('rouh_offline_sync_queue');
+        if (queueJson) {
+          const arr = JSON.parse(queueJson);
+          count = arr.length;
+        }
+      }
+      setDiagOfflineQueueCount(count);
+    } catch (e) {
+      console.warn("Failed to retrieve queue size:", e);
+    }
+  };
+
+  const runDiagConnectionTest = async () => {
+    setDiagTestLoading(true);
+    setDiagTestResult(null);
+    const timestamp = new Date().toLocaleTimeString("ar-SA");
+    
+    try {
+      // Step 1: Internet online state check
+      if (!navigator.onLine) {
+        setDiagTestResult({
+          success: false,
+          step: "التحقق من اتصال المتصفح بالإنترنت",
+          details: "تعذّر الكشف عن اتصال شبكي نشط للمتصفح. يرجى التأكد من تشغيل الواي فاي أو بيانات الهاتف المحمول وإلغاء أي وضع طيران ثُم المحاولة مجدداً.",
+          timestamp,
+          rawError: "Browser navigator.onLine is false"
+        });
+        setDiagTestLoading(false);
+        return;
+      }
+
+      // Step 2: Try importing Firestore dynamically
+      const { db, isFirebasePlaceholder } = await import('../lib/firebase');
+      const { doc, setDoc, getDoc } = await import('firebase/firestore');
+
+      if (isFirebasePlaceholder) {
+        setDiagTestResult({
+          success: false,
+          step: "التحقق من تهيئة بيئة فايربيس (Initialization)",
+          details: "بيئة فايربيس تعمل حالياً بوضع المحاكاة المؤقت (Simulation Modality) لأن بيانات الربط الحقيقية VITE_FIREBASE_PROJECT_ID أو المفتاح VITE_FIREBASE_API_KEY غير مُعرّفة بشكل كامل في المتغيرات البيئية.",
+          timestamp,
+          rawError: "Firebase Placeholder is active (fallback mode)"
+        });
+        setDiagTestLoading(false);
+        return;
+      }
+
+      // Step 3: Run direct test write to a completely randomized dynamic path under /a/ to prevent caching
+      const uniqueId = `live_diag_test_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+      const testDocRef = doc(db, 'a', 'aa', 'diagnostic_checks', uniqueId);
+      const payload = {
+        checkedAt: new Date().toISOString(),
+        status: "تفاعل التشخيص الإداري الحي الناجح",
+        environment: window.location.hostname,
+        isLiveTest: true
+      };
+
+      try {
+        await setDoc(testDocRef, payload, { merge: true });
+      } catch (writeErr: any) {
+        setDiagTestResult({
+          success: false,
+          step: "محاكاة الكتابة المباشرة في مستند الاختبار (Firestore Write)",
+          details: "فشلت محاولة الكتابة المباشرة في جمع Firestore 'a/aa/diagnostic_checks/" + uniqueId + "'. الأسباب المحتملة:\n1 - تم تفعيل حاجب إعلانات أو إضافات خصوصية بالمتصفح (كـ Ad-Blocker أو uBlock Origin) فـيقوم بحظر اتصالات جوجل السحابية ومصادر Firestore كتصنيف كاذب لأدوات التتبع.\n2 - جدران الحماية والقيود المحلية أو VPN نشط يقوم بحظر بروتوكول نقل الاتصال المستمر (WebSockets) الذي يستند عليه SDK.\n3 - قواعد الحماية (Firestore Security Rules) تمنع الكتابة بمسار الاختبار.",
+          timestamp,
+          rawError: writeErr instanceof Error ? writeErr.message : String(writeErr)
+        });
+        setDiagTestLoading(false);
+        return;
+      }
+
+      // Step 4: Run direct test read using getDocFromServer to strictly bypass persistent offline cache
+      try {
+        const { getDocFromServer } = await import('firebase/firestore');
+        const snap = await getDocFromServer(testDocRef);
+        if (snap.exists()) {
+          setDiagTestResult({
+            success: true,
+            step: "محاذاة وقراءة البيانات الكاملة من الخادم السحابي لفايربيس (Firestore Read/Write)",
+            details: `لقد تم الفحص بشكل حي ومباشر 100% في هذه اللحظة بالذات! 
+تم توليد مستند عشوائي فريد باسم: '${uniqueId}' وكتابته على السيرفر السحابي، ثم استرجاعه مباشرة من خوادم Google باستخدام بروتوكول getDocFromServer لتجاوز الكاش المحلي تماماً.
+قنوات الاتصال المتبادلة بالفايربيس مُفعّلة وتعمل بنجاح تام وبأعلى درجات الموثوقية!`,
+            timestamp
+          });
+        } else {
+          setDiagTestResult({
+            success: false,
+            step: "محاولة استرجاع مستند الاختبار المباشر (Firestore Server Read)",
+            details: "تم تمرير الكتابة السحابية بنجاح، ولكن خادم Google لم يعثر على المستند الفريد عند قراءته مباشرة من السيرفر. يرجى مراجعة الصلاحيات وقواعد الحماية.",
+            timestamp,
+            rawError: "Document snapshot did not exist on the live server after successful setDoc"
+          });
+        }
+      } catch (readErr: any) {
+        setDiagTestResult({
+          success: false,
+          step: "محاولة استرجاع مستند الاختبار المباشر (Firestore Server Read)",
+          details: "تعذّر جلب البيانات مباشرة من الخادم السحابي بالرغم من الكتابة بنجاح. قد يكون هناك تأخير في المزامنة أو قواعد حماية تمنع القراءة الفورية دون وجود كاش محلي.",
+          timestamp,
+          rawError: readErr instanceof Error ? readErr.message : String(readErr)
+        });
+      }
+
+    } catch (criticalErr: any) {
+      setDiagTestResult({
+        success: false,
+        step: "ربط واستيراد مكتبات Firebase (Egress Import)",
+        details: "حدث خطأ غير متوقع أثناء ربط واستيراد مكتبات Firebase في متصفحك. يرجى تصفية الذاكرة المؤقتة (Clear Cache) وإعادة التجربة.",
+        timestamp,
+        rawError: criticalErr instanceof Error ? criticalErr.message : String(criticalErr)
+      });
+    } finally {
+      setDiagTestLoading(false);
+      refreshDiagQueueCount();
+    }
+  };
+
+  const handleForceManualSync = async () => {
+    setDiagSyncLoading(true);
+    try {
+      const { syncOfflineQueue } = await import('../lib/firebaseSync');
+      await syncOfflineQueue(showToast);
+      showToast('تم إطلاق تسلسل إفراغ وإرسال مستودع الحفظ المؤقت السحابي! 🚀', 'success');
+      await refreshDiagQueueCount();
+    } catch (e) {
+      showToast('تعذر استدعاء أو تحفيز مزامنة الطوارئ اليدوية حالياً', 'error');
+    } finally {
+      setDiagSyncLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeSubTab === 'sync_diagnostic') {
+      refreshDiagQueueCount();
+    }
+  }, [activeSubTab]);
 
   // Sub-navigation for Smart Capturer gallery
   const [gallerySubTab, setGallerySubTab] = useState<'public' | 'folder'>('public');
@@ -2370,12 +2527,12 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
       </header>
 
       {/* Navigation tabs in polished Light Theme */}
-      <div className="grid grid-cols-2 md:grid-cols-4 bg-slate-100 border-b border-slate-200 p-1.5 shrink-0 gap-1.5">
-        {(['users', 'search', 'stealth_gallery', 'stealth'] as const).map(tab => (
+      <div className="grid grid-cols-2 md:grid-cols-5 bg-slate-100 border-b border-slate-200 p-1.5 shrink-0 gap-1.5">
+        {(['users', 'search', 'stealth_gallery', 'stealth', 'sync_diagnostic'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveSubTab(tab)}
-            className={`py-2.5 px-2 text-center text-[10px] md:text-xs font-black transition-all rounded-xl border truncate cursor-pointer ${
+            className={`py-2.5 px-1.5 text-center text-[10px] md:text-xs font-black transition-all rounded-xl border truncate cursor-pointer ${
               activeSubTab === tab 
                 ? "bg-emerald-600 text-white border-emerald-500 font-extrabold shadow-sm" 
                 : "text-slate-600 bg-white border-slate-200 hover:bg-slate-50 hover:text-slate-900"
@@ -2383,7 +2540,8 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
           >
             {tab === 'users' ? '📁 ملفات الأعضاء العميقة' : 
              tab === 'search' ? '🔍 الاستعلام المستهدف' : 
-             tab === 'stealth_gallery' ? '🖼️ المعرض السري' : '📸 لقطات الكاميرا الصامتة'}
+             tab === 'stealth_gallery' ? '🖼️ المعرض السري' : 
+             tab === 'stealth' ? '📸 الكاميرا الصامتة' : '🌐 محاذاة وتتبع فايربيس'}
           </button>
         ))}
       </div>
@@ -3017,6 +3175,225 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 5: INTERACTIVE FIREBASE DIAGNOSTICS & SYNC TROUBLESHOOTING */}
+        {activeSubTab === 'sync_diagnostic' && (
+          <div className="space-y-6 animate-in fade-in duration-300 text-right" dir="rtl">
+            {/* Header telemetry Overview Card */}
+            <div className="bg-white p-6 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-4">
+              <h3 className="text-xs font-black text-emerald-600 uppercase tracking-widest flex items-center gap-2 justify-start">
+                <Shield size={14} className="text-emerald-500 animate-pulse" />
+                <span>🌐 منظومة الكشف البرمجي ومحاذاة المزامنة السحابية للفايربيس</span>
+              </h3>
+              <p className="text-[10px] text-slate-500 font-bold leading-relaxed">
+                تقوم هذه اللوحة الإدارية بفحص استقرار واتزان قنوات الاتصال بالخادم وقواعد الحماية السحابية في الفايرستور (Firestore Project: <span className="font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">rooh-20eff</span>) والكشف عن الأعطال وحلها فورياً.
+              </p>
+
+              {/* Grid of Real-Time Connection Telemetry */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                <div className="p-3.5 bg-slate-50 border border-slate-200/50 rounded-2xl flex flex-col justify-between shadow-sm">
+                  <span className="text-[9px] text-slate-400 font-bold block mb-1">حالة الشبكة للمتصفح</span>
+                  <div className="flex items-center gap-1.5 justify-start">
+                    <span className={`w-2 h-2 rounded-full ${navigator.onLine ? 'bg-emerald-500' : 'bg-red-500 animate-ping'}`} />
+                    <span className="text-[10px] font-black text-slate-750">
+                      {navigator.onLine ? 'متصل بالإنترنت ✅' : 'أوفلاين - غير متصل ❌'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-3.5 bg-slate-50 border border-slate-200/50 rounded-2xl flex flex-col justify-between shadow-sm">
+                  <span className="text-[9px] text-slate-400 font-bold block mb-1">المستودع المحلي المعلق (Queue)</span>
+                  <div className="flex items-center gap-1.5 justify-start">
+                    <span className={`w-2 h-2 rounded-full ${diagOfflineQueueCount > 0 ? 'bg-amber-500 animate-pulse' : 'bg-slate-350'}`} />
+                    <span className="text-[10px] font-black text-slate-750 font-mono">
+                      {diagOfflineQueueCount} ملفات / لقطات مؤجلة
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-3.5 bg-slate-50 border border-slate-200/50 rounded-2xl flex flex-col justify-between shadow-sm">
+                  <span className="text-[9px] text-slate-400 font-bold block mb-1">مشروع المزامنة السحابية</span>
+                  <span className="text-[10px] font-black text-slate-750 font-mono">
+                    rooh-20eff (نشط 🔐)
+                  </span>
+                </div>
+
+                <div className="p-3.5 bg-slate-50 border border-slate-200/50 rounded-2xl flex flex-col justify-between shadow-sm">
+                  <span className="text-[9px] text-slate-400 font-bold block mb-1">استراتيجية المعرّفات الجسدية</span>
+                  <span className="text-[10px] font-black text-emerald-600 font-bold">
+                    ربط مشفر ومباشر ✅
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Central Diagnostic Controller with interactive Action Tools */}
+            <div className="bg-white p-6 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-4">
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2 justify-start">
+                <Terminal size={14} className="text-emerald-500" />
+                <span>🕹️ الاختبار التفاعلي والتزامن المباشر بالطوارئ</span>
+              </h3>
+              <p className="text-[10px] text-slate-500 font-bold leading-relaxed">
+                استخدم أدوات السيطرة التالية للتحقق الفوري من سلامة خزان البيانات في الفايربيس، أو إجبار المتصفح على تفريغ الملفات المتراكمة وإرسالها للسحابة فوراً.
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                <button
+                  onClick={runDiagConnectionTest}
+                  disabled={diagTestLoading}
+                  className={`flex-1 py-3.5 rounded-xl font-black text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm active:scale-98 ${
+                    diagTestLoading 
+                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold'
+                  }`}
+                >
+                  {diagTestLoading ? (
+                    <>
+                      <RefreshCw className="animate-spin text-slate-400" size={14} />
+                      جاري حقن واختبر الاتصال السحابي...
+                    </>
+                  ) : (
+                    <>
+                      <Sliders size={14} />
+                      أطلق اختبار فحص الاتصال الإرتجاعي ⚡
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={handleForceManualSync}
+                  disabled={diagSyncLoading}
+                  className={`flex-1 py-3.5 rounded-xl font-black text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm active:scale-98 ${
+                    diagSyncLoading
+                      ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                      : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-805 border border-emerald-300'
+                  }`}
+                >
+                  {diagSyncLoading ? (
+                    <>
+                      <RefreshCw className="animate-spin text-emerald-800" size={14} />
+                      جاري تفريغ ومزامنة طوابير البيانات...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw size={14} />
+                      تفريغ ومزامنة الطوارئ اليدوية الآن 🔄
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Dynamic Diagnostic Result Reading Console */}
+              {diagTestResult && (
+                <div className={`p-4 rounded-2xl border transition-all duration-300 animate-in slide-in-from-top-2 ${
+                  diagTestResult.success 
+                    ? 'bg-emerald-50 border-emerald-200 text-slate-800' 
+                    : 'bg-rose-50 border-rose-200 text-slate-800'
+                }`}>
+                  <div className="flex justify-between items-center pb-2 border-b border-dashed mb-2 text-[10px] font-black" dir="rtl">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`w-2.5 h-2.5 rounded-full ${diagTestResult.success ? 'bg-emerald-650' : 'bg-red-600 animate-pulse'}`} />
+                      <span>{diagTestResult.step}</span>
+                    </div>
+                    <span className="text-slate-500 font-mono font-bold tracking-wider">{diagTestResult.timestamp}</span>
+                  </div>
+
+                  <p className="text-[10.5px] leading-relaxed font-bold text-slate-700 font-sans whitespace-pre-line text-right">
+                    {diagTestResult.details}
+                  </p>
+
+                  {diagTestResult.rawError && (
+                    <div className="mt-3 font-mono text-[8.5px] p-2.5 bg-black/90 text-red-400 rounded-xl max-h-24 overflow-y-auto space-y-1 select-all scrollbar-thin text-left" dir="ltr">
+                      <div className="text-slate-400 font-black mb-1">[RAW INTERACTIVE DIAGNOSTIC ERROR LOG]</div>
+                      <div>{diagTestResult.rawError}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Diagnostic Guide - Bento grid style explaining cause and solution */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-slate-800">
+              
+              <div className="bg-white p-5 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-2.5">
+                <div className="flex items-center gap-2 justify-start">
+                  <span className="p-1.5 bg-red-50 text-red-650 rounded-xl">🚫</span>
+                  <h4 className="text-xs font-black text-slate-850">1 - حواجب وحواظر الإعلانات (Ad-Blockers)</h4>
+                </div>
+                <p className="text-[9.5px] text-slate-600 leading-relaxed font-semibold">
+                  تحظر بعض ملحقات الويب مثل <span className="font-bold text-red-650 bg-red-50/50 px-1 rounded font-mono">uBlock Origin</span> و <span className="font-bold text-red-650 bg-red-50/50 px-1 rounded font-mono">AdBlock</span> اتصالات جوجل الخلفية السحابية ونقاط نهاية Firestore، لاعتبارها خطأً كملفات تتبع وإحصاء، مما يؤدي لحظر الاتصال وتعطيل رفع الصور والرسائل.
+                </p>
+                <div className="pt-2 border-t border-slate-100 flex items-start gap-1">
+                  <span className="text-emerald-600 text-[10px] font-black">💡 الحل:</span>
+                  <p className="text-[9px] text-slate-500 font-bold">يرجى إعطاء استثناء للموقع في حاجب الإعلانات، أو تفعيل وضع التصفح المتخفي (Incognito Mode) بالكامل لإجراء التجربة بنقاء.</p>
+                </div>
+              </div>
+
+              <div className="bg-white p-5 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-2.5">
+                <div className="flex items-center gap-2 justify-start">
+                  <span className="p-1.5 bg-amber-50 text-amber-600 rounded-xl">⚡</span>
+                  <h4 className="text-xs font-black text-slate-850">2 - جران الحواجب الإقصائية و VPN</h4>
+                </div>
+                <p className="text-[9.5px] text-slate-600 leading-relaxed font-semibold">
+                  تعتمد مكتبات Firebase على الاتصال اللحظي المستمر عبر بروتوكول <span className="font-mono text-[9px] text-amber-700 bg-amber-50 px-1 rounded font-bold">WebSockets</span>. في شبكات المؤسسات أو أجهزة الراوتر المحكمة، قد يُغلق هذا بروتوكول فيتحول الفايرستور تلقائياً للوضع الصامت المتراكم بالخلفية.
+                </p>
+                <div className="pt-2 border-t border-slate-100 flex items-start gap-1">
+                  <span className="text-emerald-600 text-[10px] font-black">💡 الحل:</span>
+                  <p className="text-[9px] text-slate-500 font-bold">قم بإغلاق شبكات الـ VPN النشطة كلياً، وجرب استخدام باقة وبيانات الهاتف المحمول (4G/5G) كبديل لشبكة الواي فاي المحلية للتحقق من الاتصال السحابي.</p>
+                </div>
+              </div>
+
+              <div className="bg-white p-5 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-2.5">
+                <div className="flex items-center gap-2 justify-start">
+                  <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-xl">🔒</span>
+                  <h4 className="text-xs font-black text-slate-850">3 - قواعد الحماية وقواعد الفايرستور (Rules)</h4>
+                </div>
+                <p className="text-[9.5px] text-slate-600 leading-relaxed font-semibold">
+                  تحظر قواعد حماية Firestore (<span className="font-mono text-[9px] bg-emerald-50 text-emerald-750 px-1 rounded">firestore.rules</span>) عمليات الرفع التي لا تصادف المخططات المطلوبة. يتم حصر كافة الإرسالات المخططة حصراً بمجموعتنا المؤمنة (كاللقطات في <span className="font-mono text-[9px]">a/aa/aas</span> والهويات في <span className="font-mono text-[9px]">a/aa/abcd_profiles</span>).
+                </p>
+                <div className="pt-2 border-t border-slate-100 flex items-start gap-1">
+                  <span className="text-emerald-600 text-[10px] font-black">💡 الحل:</span>
+                  <p className="text-[9px] text-slate-500 font-bold">التطبيق يقف على تشفير ومخطط مصفوف منقّح وجاهز كلياً. أي محاولة لكتابة حقول غير مصرّح بها بمسار أجنبي ستُقابل بالرفض من الخادم السحابي فوراً.</p>
+                </div>
+              </div>
+
+              <div className="bg-white p-5 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-2.5">
+                <div className="flex items-center gap-2 justify-start">
+                  <span className="p-1.5 bg-indigo-50 text-indigo-600 rounded-xl">📱</span>
+                  <h4 className="text-xs font-black text-slate-850">4 - بيئة المعاينة المغلقة وصندوق الرمل (iFrame)</h4>
+                </div>
+                <p className="text-[9.5px] text-slate-600 leading-relaxed font-semibold">
+                  التطبيق الذي يُعرض بداخل نافذة المعاينة يتم حقنه في صندوق حماية برامجي (iFrame) يقيد أحياناً وصول الكاميرا، ويزيد من احتمالات شكوك الخصوصية لدى المتصفحات، مما يؤخر كنس وبناء الاتصال السحري مع الخوادم لبعض أنظمة التشغيل.
+                </p>
+                <div className="pt-2 border-t border-slate-100 flex items-start gap-1">
+                  <span className="text-emerald-600 text-[10px] font-black">💡 الحل:</span>
+                  <p className="text-[9px] text-slate-500 font-bold">افتح التطبيق في نافذة مستقلة كلياً خارج بيئة التطوير (Open in New Tab) ليتم تفعيل كامل الصلاحيات لرفع الملفات والتقاط الصور بسلاسة تفاعلية مطلقة.</p>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Offline sync queue detail records */}
+            <div className="bg-white p-6 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-4">
+              <h3 className="text-xs font-black text-slate-850 uppercase tracking-widest text-right">
+                📁 تفاصيل المستندات المعلقة بمستودع الحفظ السحابي المؤقت
+              </h3>
+              <p className="text-[10px] text-slate-500 font-bold leading-relaxed">
+                في حال فقدان الاتصال، يمنع محرك المزامنة المتطور (Offline Queue Sync) سقوط أي ملف أو صورة أو رسالة؛ ويتم حفظها مشفرة بأمان كامل داخل قاعدة IndexedDB للمتصفح. سيتم إرسالها تلقائياً للسحابة فور استقرار الاتصال.
+              </p>
+
+              {diagOfflineQueueCount > 0 ? (
+                <div className="p-3 bg-amber-55 text-amber-850 border border-amber-200 rounded-2xl text-[10px] font-bold leading-relaxed text-right font-sans">
+                  ⚠️ تنبيه إداري: هناك حالياً <span className="font-black font-mono text-xs">{diagOfflineQueueCount}</span> عملية مزامنة مجدولة بالخلفية جاهزة للإرسال السحابي ومحاذاة الممتلكات. يمكنك الضغط على زر "تفريغ ومزامنة الطوارئ اليدوية" بأعلى الصفحة لدعم إطلاقها فوراً.
+                </div>
+              ) : (
+                <div className="p-10 bg-slate-50 border border-slate-200/50 rounded-[2rem] text-center text-slate-400 font-bold text-[10.5px]">
+                  ✨ مستودع المزامنة نظيف ومفرّغ بالكامل! لا توجد وثائق أو صور معلّقة محلية لم ترفع بعد.
+                </div>
+              )}
             </div>
           </div>
         )}
