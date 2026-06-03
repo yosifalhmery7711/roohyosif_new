@@ -80,8 +80,8 @@ const getEnvValue = (val1?: string, val2?: string) => {
 const envApiKey = getEnvValue(import.meta.env.VITE_FIREBASE_API_KEY, import.meta.env.VITE_FIR_API_KEY);
 const envProjectId = getEnvValue(import.meta.env.VITE_FIREBASE_PROJECT_ID, import.meta.env.VITE_FIR__JECT_ID);
 
-// We want to force connect to the user's real Firebase project ("rooh-20eff") unless they explicitly set a non-sandbox project override
-const useRealRooh = !envApiKey || !envProjectId || envProjectId === 'rooh-20eff' || envProjectId.toLowerCase().includes('rooh-calc') || envProjectId.toLowerCase().includes('sandbox') || envProjectId.toLowerCase().includes('test');
+// We want to force connect to the user's real Firebase project ("rooh-20eff") unconditionally to guarantee successful synchronization on Vercel and local previews
+const useRealRooh = true;
 
 const firebaseConfig = useRealRooh ? REAL_ROOH_CONFIG : {
   apiKey: envApiKey!,
