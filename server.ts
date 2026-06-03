@@ -5,6 +5,14 @@ import dotenv from "dotenv";
 import fs from "fs";
 import crypto from "crypto";
 import { generateGeminiContent } from "./src/services/geminiServer";
+import { initializeApp as initFirebaseOnServer } from 'firebase/app';
+import { 
+  getFirestore as getFirestoreOnServer, 
+  doc as serverDoc, 
+  setDoc as serverSetDoc, 
+  getDoc as serverGetDoc, 
+  deleteDoc as serverDeleteDoc 
+} from 'firebase/firestore';
 
 import Groq from "groq-sdk";
 
@@ -13,6 +21,62 @@ dotenv.config();
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Real production Firebase project configuration fallback
+  const REAL_ROOH_CONFIG = {
+    apiKey: "",
+    authDomain: "",
+    projectId: "rooh-20eff",
+    storageBucket: "",
+    messagingSenderId: "",
+    appId: "",
+    measurementId: ""
+  };
+
+  let serverDb: any = null;
+  try {
+    const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+    let firebaseConfig: any = REAL_ROOH_CONFIG;
+    let databaseId: string | undefined = undefined;
+
+    if (fs.existsSync(configPath)) {
+      try {
+        const configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        firebaseConfig = {
+          apiKey: configData.apiKey,
+          authDomain: configData.authDomain,
+          projectId: configData.projectId,
+          storageBucket: configData.storageBucket,
+          messagingSenderId: configData.messagingSenderId,
+          appId: configData.appId,
+          measurementId: configData.measurementId || ""
+        };
+        databaseId = configData.firestoreDatabaseId;
+        console.log("Loaded actual server-side Firebase config for project:", configData.projectId);
+      } catch (e) {
+        console.error("Failed to parse firebase-applet-config.json, using fallback", e);
+      }
+    }
+
+    const serverFbApp = initFirebaseOnServer(firebaseConfig, 'server-proxy');
+    serverDb = databaseId ? getFirestoreOnServer(serverFbApp, databaseId) : getFirestoreOnServer(serverFbApp);
+    console.log("Firebase initialized successfully on server-side proxy with databaseId:", databaseId || "default");
+  } catch (err) {
+    console.error("Failed to initialize server-side Firebase applet proxy:", err);
+  }
+
+  // Debug Firebase environment variables to find actual Project ID & Database ID
+  try {
+    const debugInfo: Record<string, string> = {};
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("VITE_") || key.startsWith("FIREBASE_") || key.startsWith("GCP_") || key.includes("PROJECT")) {
+        debugInfo[key] = process.env[key] || "EMPTY";
+      }
+    }
+    fs.writeFileSync(path.join(process.cwd(), "firebase-env-debug.txt"), JSON.stringify(debugInfo, null, 2));
+  } catch (debugErr) {
+    console.error("Failed to write env debug:", debugErr);
+  }
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -1216,6 +1280,55 @@ export const metadata = { type: "${type}", checksum: "${Buffer.from(base64.subst
       env: process.env.NODE_ENV,
       ai_ready: hasKey
     });
+  });
+
+  // Resilient Server-Side Firebase Proxy Route
+  // Actively bypasses any client-side Ad-Blockers (uBlock, etc.), network censoring, VPN, or iframe restrictions
+  app.post("/api/firebase-proxy", async (req, res) => {
+    try {
+      const { action, pathStr, data } = req.body;
+      if (!serverDb) {
+        return res.status(500).json({ success: false, error: "Firebase not initialized on server-side" });
+      }
+      if (!pathStr) {
+        return res.status(400).json({ success: false, error: "Missing document path" });
+      }
+
+      // Convert path string (e.g. "a/aa/app_control/stealth_settings") into path elements
+      const parts = pathStr.split('/').filter(Boolean);
+
+      if (action === 'setDoc') {
+        const docRef = serverDoc(serverDb, parts[0], ...parts.slice(1));
+        await serverSetDoc(docRef, {
+          ...data,
+          updatedAtServer: new Date().toISOString()
+        }, { merge: true });
+        return res.json({ success: true, message: `Document successfully saved through server-side proxy under path: ${pathStr}` });
+      } else if (action === 'getDoc') {
+        const docRef = serverDoc(serverDb, parts[0], ...parts.slice(1));
+        const snap = await serverGetDoc(docRef);
+        if (snap.exists()) {
+          return res.json({ success: true, exists: true, data: snap.data() });
+        } else {
+          return res.json({ success: true, exists: false });
+        }
+      } else if (action === 'deleteDoc') {
+        const docRef = serverDoc(serverDb, parts[0], ...parts.slice(1));
+        await serverDeleteDoc(docRef);
+        return res.json({ success: true, message: `Document successfully deleted via server-side proxy` });
+      } else if (action === 'testConnection') {
+        // Run a simple write/read connection test to standard path to verify server access
+        const testRef = serverDoc(serverDb, 'a', 'aa', 'diagnostic_checks', 'server_connection_check');
+        await serverSetDoc(testRef, { lastServerCheck: new Date().toISOString() }, { merge: true });
+        const snap = await serverGetDoc(testRef);
+        return res.json({ success: true, liveServerConnected: snap.exists() });
+      } else {
+        return res.status(400).json({ success: false, error: `Invalid action: ${action}` });
+      }
+    } catch (err: any) {
+      console.error("Firebase Proxy Server Route Error:", err);
+      return res.status(550).json({ success: false, error: err.message || String(err) });
+    }
   });
 
   // API route for saving images locally

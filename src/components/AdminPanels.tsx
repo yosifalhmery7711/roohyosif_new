@@ -1031,6 +1031,12 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
 
   // Interactive Firebase Diagnostic & Troubleshooting States
   const [diagOfflineQueueCount, setDiagOfflineQueueCount] = useState<number>(0);
+  const [syncProgress, setSyncProgress] = useState<{
+    synced: number;
+    remaining: number;
+    total: number;
+    active: boolean;
+  } | null>(null);
   const [diagTestLoading, setDiagTestLoading] = useState<boolean>(false);
   const [diagTestResult, setDiagTestResult] = useState<{
     success: boolean;
@@ -1080,75 +1086,153 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
         return;
       }
 
-      // Step 2: Try importing Firestore dynamically
+      // Step 2: Try direct client-side write/read
       const { db, isFirebasePlaceholder } = await import('../lib/firebase');
-      const { doc, setDoc, getDoc } = await import('firebase/firestore');
+      const { doc, setDoc, getDocFromServer, deleteDoc } = await import('firebase/firestore');
 
-      if (isFirebasePlaceholder) {
-        setDiagTestResult({
-          success: false,
-          step: "التحقق من تهيئة بيئة فايربيس (Initialization)",
-          details: "بيئة فايربيس تعمل حالياً بوضع المحاكاة المؤقت (Simulation Modality) لأن بيانات الربط الحقيقية VITE_FIREBASE_PROJECT_ID أو المفتاح VITE_FIREBASE_API_KEY غير مُعرّفة بشكل كامل في المتغيرات البيئية.",
-          timestamp,
-          rawError: "Firebase Placeholder is active (fallback mode)"
-        });
-        setDiagTestLoading(false);
-        return;
-      }
-
-      // Step 3: Run direct test write to a completely randomized dynamic path under /a/ to prevent caching
+      let clientSuccess = false;
+      let clientErrorMsg = "";
       const uniqueId = `live_diag_test_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-      const testDocRef = doc(db, 'a', 'aa', 'diagnostic_checks', uniqueId);
-      const payload = {
-        checkedAt: new Date().toISOString(),
-        status: "تفاعل التشخيص الإداري الحي الناجح",
-        environment: window.location.hostname,
-        isLiveTest: true
-      };
 
-      try {
-        await setDoc(testDocRef, payload, { merge: true });
-      } catch (writeErr: any) {
-        setDiagTestResult({
-          success: false,
-          step: "محاكاة الكتابة المباشرة في مستند الاختبار (Firestore Write)",
-          details: "فشلت محاولة الكتابة المباشرة في جمع Firestore 'a/aa/diagnostic_checks/" + uniqueId + "'. الأسباب المحتملة:\n1 - تم تفعيل حاجب إعلانات أو إضافات خصوصية بالمتصفح (كـ Ad-Blocker أو uBlock Origin) فـيقوم بحظر اتصالات جوجل السحابية ومصادر Firestore كتصنيف كاذب لأدوات التتبع.\n2 - جدران الحماية والقيود المحلية أو VPN نشط يقوم بحظر بروتوكول نقل الاتصال المستمر (WebSockets) الذي يستند عليه SDK.\n3 - قواعد الحماية (Firestore Security Rules) تمنع الكتابة بمسار الاختبار.",
-          timestamp,
-          rawError: writeErr instanceof Error ? writeErr.message : String(writeErr)
-        });
-        setDiagTestLoading(false);
-        return;
+      if (!isFirebasePlaceholder) {
+        try {
+          const testDocRef = doc(db, 'a', 'aa', 'diagnostic_checks', uniqueId);
+          // 1. Write lightweight test data packet
+          await setDoc(testDocRef, {
+            checkedAt: new Date().toISOString(),
+            status: "تفاعل التشخيص المباشر",
+            via: "client_direct"
+          }, { merge: true });
+          
+          // 2. Fetch/Read it to verify full readiness
+          const snap = await getDocFromServer(testDocRef);
+          if (snap.exists() && snap.data()?.status === "تفاعل التشخيص المباشر") {
+            clientSuccess = true;
+          } else {
+            clientErrorMsg = "Snapshot snap.exists() returned false or data was corrupted from Firestore server.";
+          }
+
+          // 3. Delete it immediately afterwards to keep the database tidy
+          try {
+            await deleteDoc(testDocRef);
+          } catch (delErr) {
+            console.warn("Failed to delete direct diagnostic check doc: ", delErr);
+          }
+        } catch (err: any) {
+          clientErrorMsg = err instanceof Error ? err.message : String(err);
+        }
+      } else {
+        clientErrorMsg = "Firebase environment in simulator placeholder state (No client keys).";
       }
 
-      // Step 4: Run direct test read using getDocFromServer to strictly bypass persistent offline cache
+      // Step 3: Try Resilient Server-Side Proxy write/read
+      let proxySuccess = false;
+      let proxyErrorMsg = "";
       try {
-        const { getDocFromServer } = await import('firebase/firestore');
-        const snap = await getDocFromServer(testDocRef);
-        if (snap.exists()) {
-          setDiagTestResult({
-            success: true,
-            step: "محاذاة وقراءة البيانات الكاملة من الخادم السحابي لفايربيس (Firestore Read/Write)",
-            details: `لقد تم الفحص بشكل حي ومباشر 100% في هذه اللحظة بالذات! 
-تم توليد مستند عشوائي فريد باسم: '${uniqueId}' وكتابته على السيرفر السحابي، ثم استرجاعه مباشرة من خوادم Google باستخدام بروتوكول getDocFromServer لتجاوز الكاش المحلي تماماً.
-قنوات الاتصال المتبادلة بالفايربيس مُفعّلة وتعمل بنجاح تام وبأعلى درجات الموثوقية!`,
-            timestamp
-          });
+        // 1. Post to proxy to write the lightweight package
+        const proxyRes = await fetch('/api/firebase-proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'setDoc',
+            pathStr: `a/aa/diagnostic_checks/${uniqueId}_proxy`,
+            data: {
+              checkedAt: new Date().toISOString(),
+              status: "تفاعل التشخيص عبر البروكسي",
+              via: "server_proxy"
+            }
+          })
+        });
+
+        if (proxyRes.ok) {
+          const proxyResult = await proxyRes.json();
+          if (proxyResult.success) {
+            // 2. Retrieve/Get doc via proxy to verify reading capability
+            const getRes = await fetch('/api/firebase-proxy', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'getDoc',
+                pathStr: `a/aa/diagnostic_checks/${uniqueId}_proxy`
+              })
+            });
+
+            if (getRes.ok) {
+              const getResult = await getRes.json();
+              if (getResult.success && getResult.exists && getResult.data?.status === "تفاعل التشخيص عبر البروكسي") {
+                proxySuccess = true;
+              } else {
+                proxyErrorMsg = "Proxy doc fetch returned empty or invalid status data.";
+              }
+            } else {
+              proxyErrorMsg = "Proxy doc verification fetch failed.";
+            }
+
+            // 3. Delete proxy check document immediately to clean up database
+            try {
+              await fetch('/api/firebase-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  action: 'deleteDoc',
+                  pathStr: `a/aa/diagnostic_checks/${uniqueId}_proxy`
+                })
+              });
+            } catch (delErr) {
+              console.warn("Failed to delete proxy check doc: ", delErr);
+            }
+          } else {
+            proxyErrorMsg = proxyResult.error || "Unknown proxy internal error";
+          }
         } else {
-          setDiagTestResult({
-            success: false,
-            step: "محاولة استرجاع مستند الاختبار المباشر (Firestore Server Read)",
-            details: "تم تمرير الكتابة السحابية بنجاح، ولكن خادم Google لم يعثر على المستند الفريد عند قراءته مباشرة من السيرفر. يرجى مراجعة الصلاحيات وقواعد الحماية.",
-            timestamp,
-            rawError: "Document snapshot did not exist on the live server after successful setDoc"
-          });
+          proxyErrorMsg = `Proxy route HTTP error: ${proxyRes.status}`;
         }
-      } catch (readErr: any) {
+      } catch (err: any) {
+        proxyErrorMsg = err instanceof Error ? err.message : String(err);
+      }
+
+      // Format diagnostic result
+      if (clientSuccess && proxySuccess) {
+        setDiagTestResult({
+          success: true,
+          step: "نجاح الاتصال المزدوج المباشر وعبر البروكسي السحابي (Dual-Path Verified!)",
+          details: `نظام المزامنة وبأكمل الجاهزية لاستقبال كافة البيانات وتدفقات الحفظ التلقائي بنجاح باهر 100%! 🛡️
+
+كجزء من إجراءات الأمان والسلامة، نجح المتصفح في:
+1️⃣ كتابة، وقراءة، وحذف حزمة تجريبية مباشرة عبر المتصفح (Direct SDK Client) بنجاح كامل! ✅
+2️⃣ كتابة، وقراءة، وحذف حزمة تجريبية مرنة عبر البروكسي المزدوج (Reverse Server Proxy) بنجاح تام! ✅
+
+كلا القناتين جاهزتان للاستقبال والإرسال السريع، وتم تطهير كافة بيانات الاختبار وحذفها بالكامل من الخوادم لإبقائها نظيفة وسريعة!`,
+          timestamp
+        });
+      } else if (proxySuccess) {
+        setDiagTestResult({
+          success: true,
+          step: "تخطي قيود المتصفح والإنترنت عبر البروكسي الخلفي ذو الحصانة العالية (Server-Side Proxy Ready!)",
+          details: `تم تجاوز حظر المتصفح وعوائق الـ VPN بنجاح باهر ومؤكد 100% لاستقبال ومعالجة المزامنة! 🚀
+
+كجزء من محاكاة التدفق وإجراء التثبت، قمنا بكتابة واختبار البيانات التجريبية عبر الخادم الخلفي، واستدعائها والتأكد من سلامتها وحذفها فوراً بنجاح!
+
+🔴 مسار الاتصال المباشر (Direct SDK): غير مستجيب أو محظور (السبب: ${clientErrorMsg}). يشير هذا إلى حظر اتصالات جوجل السحابية بواسطة إضافات حجب إعلانات مثل uBlock Origin أو الخصوصية، أو نتيجة قيود الاتصال ببعض جدران الحماية بالـ VPN.
+
+🟢 مسار البروكسي الخلفي المتطور (Server-Side Proxy): متصل ويعمل بنجاح وتوافق تام %100! ✅
+
+💡 الأمان والفعالية: بفضل تفعيل نظام البروكسي الخلفي الذكي، يُمكن للمتصفح الآن إلقاء كافة عمليات الحفظ واسترجاع المزامنة من خلال خادم التطبيق الخاص بنا (الذي لا تطاله برمجيات الحظر أو معوقات الـ VPN المحلية). مزامنتك آمنة ومستقرة تماماً للأبد!`,
+          timestamp,
+          rawError: `Direct Client SDK Log: ${clientErrorMsg}`
+        });
+      } else {
         setDiagTestResult({
           success: false,
-          step: "محاولة استرجاع مستند الاختبار المباشر (Firestore Server Read)",
-          details: "تعذّر جلب البيانات مباشرة من الخادم السحابي بالرغم من الكتابة بنجاح. قد يكون هناك تأخير في المزامنة أو قواعد حماية تمنع القراءة الفورية دون وجود كاش محلي.",
+          step: "فشل كلا مساري الاتصال (كلا القناتين متوقفتين)",
+          details: `خطأ مزدوج في التوصيل: كلا المسارين لم يتمكنا من تأدية عملیات الكتابة بفايربيس.
+          
+- خطأ الاتصال المباشر: ${clientErrorMsg}
+- خطأ اتصال البروكسي: ${proxyErrorMsg}
+
+يرجى مراجعة لوحة الحماية وقيم الاتصال بقاعدة الفايرستور.`,
           timestamp,
-          rawError: readErr instanceof Error ? readErr.message : String(readErr)
+          rawError: `Client SDK Error: ${clientErrorMsg}\n\nServer Proxy Error: ${proxyErrorMsg}`
         });
       }
 
@@ -1168,15 +1252,21 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
 
   const handleForceManualSync = async () => {
     setDiagSyncLoading(true);
+    setSyncProgress({ synced: 0, remaining: 0, total: 0, active: true });
     try {
       const { syncOfflineQueue } = await import('../lib/firebaseSync');
-      await syncOfflineQueue(showToast);
+      // Set progress state in real-time as batches sync with super fast concurrency
+      await syncOfflineQueue(showToast, (synced, remaining, total) => {
+        setSyncProgress({ synced, remaining, total, active: true });
+        setDiagOfflineQueueCount(remaining);
+      });
       showToast('تم إطلاق تسلسل إفراغ وإرسال مستودع الحفظ المؤقت السحابي! 🚀', 'success');
       await refreshDiagQueueCount();
     } catch (e) {
       showToast('تعذر استدعاء أو تحفيز مزامنة الطوارئ اليدوية حالياً', 'error');
     } finally {
       setDiagSyncLoading(false);
+      setSyncProgress(prev => prev ? { ...prev, active: false } : null);
     }
   };
 
@@ -3231,7 +3321,7 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
             </div>
 
             {/* Central Diagnostic Controller with interactive Action Tools */}
-            <div className="bg-white p-6 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-4">
+            <div className="bg-white p-6 rounded-[2rem] border border-slate-200/80 shadow-sm space-y-4 text-right">
               <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2 justify-start">
                 <Terminal size={14} className="text-emerald-500" />
                 <span>🕹️ الاختبار التفاعلي والتزامن المباشر بالطوارئ</span>
@@ -3284,6 +3374,30 @@ export const ForensicPanel6532 = ({ onClose, showToast }: { onClose: () => void,
                     </>
                   )}
                 </button>
+              </div>
+
+              {/* Real-time telemetry upload indicators (What is uploaded and what is remaining) */}
+              {syncProgress && (
+                <div className="mt-3 p-4 bg-slate-50 border border-slate-250/60 rounded-2xl flex flex-col gap-2.5 animate-in fade-in slide-in-from-top-1 text-right" dir="rtl">
+                  <div className="flex justify-between items-center text-[10px] font-black">
+                    <span className="text-slate-700">مؤشر سحب وتفريغ الطابور النشط</span>
+                    <span className="font-mono text-emerald-700 font-bold">{syncProgress.synced} / {syncProgress.total}</span>
+                  </div>
+                  <div className="w-full bg-slate-250/50 h-2 rounded-full overflow-hidden">
+                    <div 
+                      className="bg-emerald-600 h-full transition-all duration-300"
+                      style={{ width: `${syncProgress.total > 0 ? (syncProgress.synced / syncProgress.total) * 100 : 0}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between items-center text-[9.5px] text-slate-500 font-bold font-sans">
+                    <span>تم رفعه بنجاح: <strong className="text-emerald-700 font-mono text-[10.5px]">{syncProgress.synced}</strong></span>
+                    <span>المتبقي للإرسال حياً: <strong className="text-amber-600 font-mono text-[10.5px]">{syncProgress.remaining}</strong></span>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-2 text-[9.5px] bg-amber-50/70 border border-amber-200/50 p-3 rounded-2xl text-amber-900 leading-relaxed font-bold">
+                💡 <strong>تنبيه إرشادي للمشرفين:</strong> تتم عملية الحفظ والتواصل السحابية تلقائياً وبسرعة فائقة في الخلفية بنظام غير ملموس. إن زر <strong>"تفريغ ومزامنة الطوارئ اليدوية"</strong> مُعد خصيصاً لإتاحة اختبارات السلامة وكفاءة الترشيح السحابي يدوياً لأغراض التطوير والمراقبة الأمنية الفورية.
               </div>
 
               {/* Dynamic Diagnostic Result Reading Console */}

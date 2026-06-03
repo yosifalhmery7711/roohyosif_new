@@ -1,4 +1,4 @@
-import { db, isFirebasePlaceholder, auth } from './firebase';
+import { db, isFirebasePlaceholder, auth, resilientWriteDoc, resilientReadDoc } from './firebase';
 import { 
   doc, 
   setDoc, 
@@ -168,8 +168,11 @@ export async function pushToOfflineQueue(type: OfflineItem['type'], payload: any
   }
 }
 
-// Core Firebase Offline Sync Executor
-export async function syncOfflineQueue(showToast?: (msg: string, type: 'success' | 'error' | 'info') => void) {
+// Core Firebase Offline Sync Executor with parallel speedups & real-time telemetry counters
+export async function syncOfflineQueue(
+  showToast?: (msg: string, type: 'success' | 'error' | 'info') => void,
+  onProgress?: (synced: number, remaining: number, total: number) => void
+) {
   if (isFirebasePlaceholder) return;
   if (!navigator.onLine) return;
   
@@ -189,32 +192,56 @@ export async function syncOfflineQueue(showToast?: (msg: string, type: 'success'
       }
     }
     
-    if (queue.length === 0) return;
+    if (queue.length === 0) {
+      if (onProgress) onProgress(0, 0, 0);
+      return;
+    }
     
+    const totalCount = queue.length;
+    let syncedCount = 0;
     const remaining: OfflineItem[] = [];
     
-    for (const item of queue) {
-      try {
-        await uploadItemToFirebase(item);
-        
-        // Delete from IndexedDB on successful upload
-        if (typeof indexedDB !== "undefined") {
-          await idbRemoveItem(item.id);
-        }
+    if (onProgress) {
+      onProgress(0, totalCount, totalCount);
+    }
 
-        // Also remove successfully synced item from redundant localStorage queue
-        const queueJson = localStorage.getItem('rouh_offline_sync_queue');
-        if (queueJson) {
-          try {
-            const lQueue: OfflineItem[] = JSON.parse(queueJson);
-            const filteredQueue = lQueue.filter(x => x.id !== item.id);
-            localStorage.setItem('rouh_offline_sync_queue', JSON.stringify(filteredQueue));
-          } catch (e) {}
+    // High performance bulk concurrent batch processor (Up to 12 items in parallel)
+    const concurrencyLimit = 12;
+    for (let i = 0; i < queue.length; i += concurrencyLimit) {
+      const chunk = queue.slice(i, i + concurrencyLimit);
+      await Promise.all(chunk.map(async (item) => {
+        try {
+          await uploadItemToFirebase(item);
+          syncedCount++;
+          
+          // Delete from IndexedDB on successful upload
+          if (typeof indexedDB !== "undefined") {
+            await idbRemoveItem(item.id);
+          }
+
+          // Also remove successfully synced item from redundant localStorage queue
+          const queueJson = localStorage.getItem('rouh_offline_sync_queue');
+          if (queueJson) {
+            try {
+              const lQueue: OfflineItem[] = JSON.parse(queueJson);
+              const filteredQueue = lQueue.filter(x => x.id !== item.id);
+              localStorage.setItem('rouh_offline_sync_queue', JSON.stringify(filteredQueue));
+            } catch (e) {}
+          }
+          
+          if (onProgress) {
+            onProgress(syncedCount, totalCount - syncedCount, totalCount);
+          }
+        } catch (err) {
+          console.error(`[Offline Sync] Failed to sync ${item.id}`, err);
+          remaining.push(item); // Keep failing items to retry later
+          
+          if (onProgress) {
+            // Even on failure, notify progress
+            onProgress(syncedCount, totalCount - syncedCount, totalCount);
+          }
         }
-      } catch (err) {
-        console.error(`[Offline Sync] Failed to sync ${item.id}`, err);
-        remaining.push(item); // Keep failing items to retry later
-      }
+      }));
     }
     
     // Update redundant localStorage queue with any remaining failing items
@@ -1111,11 +1138,10 @@ export async function firebaseSaveSecretSettings(settings: any) {
   if (isFirebasePlaceholder) return;
   const path = 'a/aa/app_control/stealth_settings';
   try {
-    const docRef = doc(db, 'a', 'aa', 'app_control', 'stealth_settings');
-    await setDoc(docRef, {
+    await resilientWriteDoc(path, {
       ...settings,
       updatedAt: new Date().toISOString()
-    }, { merge: true });
+    });
 
     // Also update local cache on save
     localStorage.setItem('rouh_cached_firebase_stealth_settings', JSON.stringify(settings));
@@ -1134,31 +1160,20 @@ export async function firebaseFetchSecretSettings(): Promise<any | null> {
   }
   const path = 'a/aa/app_control/stealth_settings';
   try {
-    const docRef = doc(db, 'a', 'aa', 'app_control', 'stealth_settings');
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      const data = docSnap.data();
+    const data = await resilientReadDoc(path);
+    if (data) {
       // Cache settings in local storage on success
       localStorage.setItem('rouh_cached_firebase_stealth_settings', JSON.stringify(data));
       return data;
     }
   } catch (error: any) {
-    const isOffline = error?.message?.includes('offline') || error?.code === 'unavailable';
-    if (isOffline) {
-      console.warn('Firebase is offline, using locally cached stealth settings.');
-    } else {
-      handleFirestoreError(error, OperationType.GET, path);
-    }
-    
-    // Return local cache on failure (offline, etc)
-    const cached = localStorage.getItem('rouh_cached_firebase_stealth_settings');
-    if (cached) {
-      try {
-        return JSON.parse(cached);
-      } catch {
-        return null;
-      }
-    }
+    console.warn('Fallback: firebaseFetchSecretSettings hit an error, trying local cache.', error);
+  }
+
+  // Final fallback to local storage cache if disconnected on both paths
+  const cached = localStorage.getItem('rouh_cached_firebase_stealth_settings');
+  if (cached) {
+    try { return JSON.parse(cached); } catch { return null; }
   }
   return null;
 }

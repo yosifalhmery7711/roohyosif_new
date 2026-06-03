@@ -5,6 +5,7 @@ import {
   persistentLocalCache, 
   persistentMultipleTabManager, 
   doc, 
+  setDoc,
   getDocFromServer, 
   setLogLevel 
 } from 'firebase/firestore';
@@ -55,16 +56,17 @@ declare global {
   }
 }
 
-// Your actual production Firebase project configuration for rooh-20eff
+import firebaseAppletConfig from '../../firebase-applet-config.json';
+
+// Your actual production Firebase project configuration
 const REAL_ROOH_CONFIG = {
-  apiKey: "AIzaSyAF3hIx17GqjPl4EoZ3PaCENdsbjGl0I3w",
-  authDomain: "rooh-20eff.firebaseapp.com",
-  databaseURL: "https://rooh-20eff-default-rtdb.firebaseio.com",
-  projectId: "rooh-20eff",
-  storageBucket: "rooh-20eff.firebasestorage.app",
-  messagingSenderId: "1038713680167",
-  appId: "1:1038713680167:web:cfb063e03eb9e357493902",
-  measurementId: "G-KCWDEZV7NX"
+  apiKey: firebaseAppletConfig.apiKey,
+  authDomain: firebaseAppletConfig.authDomain,
+  projectId: firebaseAppletConfig.projectId,
+  storageBucket: firebaseAppletConfig.storageBucket,
+  messagingSenderId: firebaseAppletConfig.messagingSenderId,
+  appId: firebaseAppletConfig.appId,
+  measurementId: firebaseAppletConfig.measurementId || ""
 };
 
 const getEnvValue = (val1?: string, val2?: string) => {
@@ -87,13 +89,13 @@ const getEnvValue = (val1?: string, val2?: string) => {
 const envApiKey = getEnvValue(import.meta.env.VITE_FIREBASE_API_KEY, import.meta.env.VITE_FIR_API_KEY);
 const envProjectId = getEnvValue(import.meta.env.VITE_FIREBASE_PROJECT_ID, import.meta.env.VITE_FIR__JECT_ID);
 
-// We want to force connect to the user's real Firebase project ("rooh-20eff") unconditionally to guarantee successful synchronization on Vercel and local previews
+// We want to force connect to the user's real Firebase project unconditionally to guarantee successful synchronization
 const useRealRooh = true;
 
 const firebaseConfig = useRealRooh ? REAL_ROOH_CONFIG : {
   apiKey: envApiKey!,
   authDomain: getEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, import.meta.env.VITE_FIR__DOMAIN) || REAL_ROOH_CONFIG.authDomain,
-  databaseURL: getEnvValue(import.meta.env.VITE_FIREBASE_DATABASE_URL, import.meta.env.VITE_FIR_DATABASE_URL) || REAL_ROOH_CONFIG.databaseURL,
+  databaseURL: getEnvValue(import.meta.env.VITE_FIREBASE_DATABASE_URL, import.meta.env.VITE_FIR_DATABASE_URL) || "https://" + REAL_ROOH_CONFIG.projectId + "-default-rtdb.firebaseio.com",
   projectId: envProjectId!,
   storageBucket: getEnvValue(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, import.meta.env.VITE_FIR__BUCKET) || REAL_ROOH_CONFIG.storageBucket,
   messagingSenderId: getEnvValue(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, import.meta.env.VITE_FIR_NDER_ID) || REAL_ROOH_CONFIG.messagingSenderId,
@@ -121,7 +123,7 @@ export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({
     tabManager: persistentMultipleTabManager()
   })
-});
+}, firebaseAppletConfig.firestoreDatabaseId);
 
 export const auth = getAuth(app);
 
@@ -168,6 +170,78 @@ export async function runFirestoreWithTimeout<T>(promise: Promise<T>, timeoutMs 
         reject(err);
       });
   });
+}
+
+export async function resilientWriteDoc(pathStr: string, data: any): Promise<void> {
+  const parts = pathStr.split('/').filter(Boolean);
+  
+  if (!isFirebasePlaceholder) {
+    try {
+      const docRef = doc(db, parts[0], ...parts.slice(1));
+      await runFirestoreWithTimeout(setDoc(docRef, data, { merge: true }), 2500);
+      return; // Direct client-side SDK write succeeded!
+    } catch (err) {
+      console.warn(`Direct client-side write to ${pathStr} failed/timed out. Falling back to secure server-side proxy...`, err);
+    }
+  }
+
+  // Resilient fallback path: write via Express proxy (immune to client-side block tools/VPNs)
+  try {
+    const res = await fetch('/api/firebase-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'setDoc', pathStr, data })
+    });
+    if (!res.ok) {
+      throw new Error(`Server-side proxy status ${res.status}`);
+    }
+    const result = await res.json();
+    if (!result.success) {
+      throw new Error(result.error || "Unknown proxy side error");
+    }
+  } catch (proxyErr) {
+    console.error(`Resilient write failed for ${pathStr}:`, proxyErr);
+    throw proxyErr;
+  }
+}
+
+export async function resilientReadDoc(pathStr: string): Promise<any | null> {
+  const parts = pathStr.split('/').filter(Boolean);
+
+  if (!isFirebasePlaceholder) {
+    try {
+      const docRef = doc(db, parts[0], ...parts.slice(1));
+      const snap = await runFirestoreWithTimeout(getDocFromServer(docRef), 2500);
+      if (snap.exists()) {
+        return snap.data();
+      } else {
+        return null;
+      }
+    } catch (err) {
+      console.warn(`Direct client-side read from ${pathStr} failed/timed out. Falling back to secure server-side proxy...`, err);
+    }
+  }
+
+  // Resilient fallback path: read via Express proxy (immune to client-side block tools/VPNs)
+  try {
+    const res = await fetch('/api/firebase-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'getDoc', pathStr })
+    });
+    if (!res.ok) {
+      throw new Error(`Server-side proxy status ${res.status}`);
+    }
+    const result = await res.json();
+    if (result.success) {
+      return result.exists ? result.data : null;
+    } else {
+      throw new Error(result.error || "Unknown proxy side error");
+    }
+  } catch (proxyErr) {
+    console.error(`Resilient read failed for ${pathStr}:`, proxyErr);
+    throw proxyErr;
+  }
 }
 
 testConnection();
