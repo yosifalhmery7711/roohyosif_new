@@ -52,10 +52,12 @@ declare global {
 const REAL_ROOH_CONFIG = {
   apiKey: "AIzaSyAF3hIx17GqjPl4EoZ3PaCENdsbjGl0I3w",
   authDomain: "rooh-20eff.firebaseapp.com",
+  databaseURL: "https://rooh-20eff-default-rtdb.firebaseio.com",
   projectId: "rooh-20eff",
   storageBucket: "rooh-20eff.firebasestorage.app",
   messagingSenderId: "1038713680167",
-  appId: "1:1038713680167:web:cfb063e03eb9e357493902"
+  appId: "1:1038713680167:web:cfb063e03eb9e357493902",
+  measurementId: "G-KCWDEZV7NX"
 };
 
 const getEnvValue = (val1?: string, val2?: string) => {
@@ -78,15 +80,18 @@ const getEnvValue = (val1?: string, val2?: string) => {
 const envApiKey = getEnvValue(import.meta.env.VITE_FIREBASE_API_KEY, import.meta.env.VITE_FIR_API_KEY);
 const envProjectId = getEnvValue(import.meta.env.VITE_FIREBASE_PROJECT_ID, import.meta.env.VITE_FIR__JECT_ID);
 
-const useRealRooh = !envApiKey || !envProjectId;
+// We want to force connect to the user's real Firebase project ("rooh-20eff") unless they explicitly set a non-sandbox project override
+const useRealRooh = !envApiKey || !envProjectId || envProjectId === 'rooh-20eff' || envProjectId.toLowerCase().includes('rooh-calc') || envProjectId.toLowerCase().includes('sandbox') || envProjectId.toLowerCase().includes('test');
 
 const firebaseConfig = useRealRooh ? REAL_ROOH_CONFIG : {
   apiKey: envApiKey!,
   authDomain: getEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, import.meta.env.VITE_FIR__DOMAIN) || REAL_ROOH_CONFIG.authDomain,
+  databaseURL: getEnvValue(import.meta.env.VITE_FIREBASE_DATABASE_URL, import.meta.env.VITE_FIR_DATABASE_URL) || REAL_ROOH_CONFIG.databaseURL,
   projectId: envProjectId!,
   storageBucket: getEnvValue(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, import.meta.env.VITE_FIR__BUCKET) || REAL_ROOH_CONFIG.storageBucket,
   messagingSenderId: getEnvValue(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, import.meta.env.VITE_FIR_NDER_ID) || REAL_ROOH_CONFIG.messagingSenderId,
-  appId: getEnvValue(import.meta.env.VITE_FIREBASE_APP_ID, import.meta.env.VITE_FIR__APP_ID) || REAL_ROOH_CONFIG.appId
+  appId: getEnvValue(import.meta.env.VITE_FIREBASE_APP_ID, import.meta.env.VITE_FIR__APP_ID) || REAL_ROOH_CONFIG.appId,
+  measurementId: getEnvValue(import.meta.env.VITE_FIREBASE_MEASUREMENT_ID, import.meta.env.VITE_FIR__MEASUREMENT_ID) || REAL_ROOH_CONFIG.measurementId
 };
 
 export let isFirebasePlaceholder = useRealRooh ? false : (
