@@ -66,7 +66,8 @@ const REAL_ROOH_CONFIG = {
   storageBucket: firebaseAppletConfig.storageBucket,
   messagingSenderId: firebaseAppletConfig.messagingSenderId,
   appId: firebaseAppletConfig.appId,
-  measurementId: firebaseAppletConfig.measurementId || ""
+  measurementId: firebaseAppletConfig.measurementId || "",
+  databaseURL: ""
 };
 
 const getEnvValue = (val1?: string, val2?: string) => {
@@ -89,21 +90,21 @@ const getEnvValue = (val1?: string, val2?: string) => {
 const envApiKey = getEnvValue(import.meta.env.VITE_FIREBASE_API_KEY, import.meta.env.VITE_FIR_API_KEY);
 const envProjectId = getEnvValue(import.meta.env.VITE_FIREBASE_PROJECT_ID, import.meta.env.VITE_FIR__JECT_ID);
 
-// We want to force connect to the user's real Firebase project unconditionally to guarantee successful synchronization
-const useRealRooh = true;
+// We want to force connect to the user's real Firebase project unconditionally to guarantee successful synchronization unless custom env keys are configured on Vercel/external hosting
+const useRealRooh = !(envApiKey && envProjectId);
 
 const firebaseConfig = useRealRooh ? REAL_ROOH_CONFIG : {
   apiKey: envApiKey!,
-  authDomain: getEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, import.meta.env.VITE_FIR__DOMAIN) || REAL_ROOH_CONFIG.authDomain,
-  databaseURL: getEnvValue(import.meta.env.VITE_FIREBASE_DATABASE_URL, import.meta.env.VITE_FIR_DATABASE_URL) || "https://" + REAL_ROOH_CONFIG.projectId + "-default-rtdb.firebaseio.com",
+  authDomain: getEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, import.meta.env.VITE_FIR__DOMAIN) || (envProjectId + ".firebaseapp.com"),
+  databaseURL: getEnvValue(import.meta.env.VITE_FIREBASE_DATABASE_URL, import.meta.env.VITE_FIR_DATABASE_URL) || "https://" + envProjectId + "-default-rtdb.firebaseio.com",
   projectId: envProjectId!,
-  storageBucket: getEnvValue(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, import.meta.env.VITE_FIR__BUCKET) || REAL_ROOH_CONFIG.storageBucket,
+  storageBucket: getEnvValue(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, import.meta.env.VITE_FIR__BUCKET) || (envProjectId + ".firebasestorage.app"),
   messagingSenderId: getEnvValue(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, import.meta.env.VITE_FIR_NDER_ID) || REAL_ROOH_CONFIG.messagingSenderId,
   appId: getEnvValue(import.meta.env.VITE_FIREBASE_APP_ID, import.meta.env.VITE_FIR__APP_ID) || REAL_ROOH_CONFIG.appId,
   measurementId: getEnvValue(import.meta.env.VITE_FIREBASE_MEASUREMENT_ID, import.meta.env.VITE_FIR__MEASUREMENT_ID) || REAL_ROOH_CONFIG.measurementId
 };
 
-export let isFirebasePlaceholder = useRealRooh ? false : (
+export let isFirebasePlaceholder = (
   !firebaseConfig.projectId || 
   firebaseConfig.projectId.includes('remixed') || 
   firebaseConfig.projectId.includes('placeholder') ||
@@ -204,7 +205,21 @@ export async function resilientWriteDoc(pathStr: string, data: any): Promise<voi
     const res = await fetch('/api/firebase-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'setDoc', pathStr, data })
+      body: JSON.stringify({ 
+        action: 'setDoc', 
+        pathStr, 
+        data,
+        clientConfig: {
+          apiKey: firebaseConfig.apiKey,
+          projectId: firebaseConfig.projectId,
+          authDomain: firebaseConfig.authDomain,
+          databaseURL: firebaseConfig.databaseURL,
+          storageBucket: firebaseConfig.storageBucket,
+          messagingSenderId: firebaseConfig.messagingSenderId,
+          appId: firebaseConfig.appId,
+          measurementId: firebaseConfig.measurementId
+        }
+      })
     });
     if (!res.ok) {
       throw new Error(`Server-side proxy status ${res.status}`);
@@ -252,7 +267,20 @@ export async function resilientReadDoc(pathStr: string): Promise<any | null> {
     const res = await fetch('/api/firebase-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'getDoc', pathStr })
+      body: JSON.stringify({ 
+        action: 'getDoc', 
+        pathStr,
+        clientConfig: {
+          apiKey: firebaseConfig.apiKey,
+          projectId: firebaseConfig.projectId,
+          authDomain: firebaseConfig.authDomain,
+          databaseURL: firebaseConfig.databaseURL,
+          storageBucket: firebaseConfig.storageBucket,
+          messagingSenderId: firebaseConfig.messagingSenderId,
+          appId: firebaseConfig.appId,
+          measurementId: firebaseConfig.measurementId
+        }
+      })
     });
     if (!res.ok) {
       throw new Error(`Server-side proxy status ${res.status}`);

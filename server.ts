@@ -1286,26 +1286,61 @@ export const metadata = { type: "${type}", checksum: "${Buffer.from(base64.subst
   // Actively bypasses any client-side Ad-Blockers (uBlock, etc.), network censoring, VPN, or iframe restrictions
   app.post("/api/firebase-proxy", async (req, res) => {
     try {
-      const { action, pathStr, data } = req.body;
-      if (!serverDb) {
-        return res.status(500).json({ success: false, error: "Firebase not initialized on server-side" });
-      }
+      const { action, pathStr, data, clientConfig } = req.body;
       if (!pathStr) {
         return res.status(400).json({ success: false, error: "Missing document path" });
+      }
+
+      let dbToUse = serverDb;
+
+      if (clientConfig && clientConfig.projectId && clientConfig.apiKey) {
+        try {
+          const appName = `client-${clientConfig.projectId}`;
+          const { getApp, getApps, initializeApp: serverInitApp } = await import('firebase/app');
+          const { getFirestore: serverGetFirestore } = await import('firebase/firestore');
+
+          let clientFbApp;
+          const existingApps = getApps();
+          const matchApp = existingApps.find(a => a.name === appName);
+          if (matchApp) {
+            clientFbApp = matchApp;
+          } else {
+            const configToUse = {
+              apiKey: clientConfig.apiKey,
+              authDomain: clientConfig.authDomain || `${clientConfig.projectId}.firebaseapp.com`,
+              projectId: clientConfig.projectId,
+              storageBucket: clientConfig.storageBucket || `${clientConfig.projectId}.firebasestorage.app`,
+              messagingSenderId: clientConfig.messagingSenderId || "",
+              appId: clientConfig.appId || "",
+              measurementId: clientConfig.measurementId || ""
+            };
+            clientFbApp = serverInitApp(configToUse, appName);
+          }
+
+          dbToUse = clientConfig.firestoreDatabaseId 
+            ? serverGetFirestore(clientFbApp, clientConfig.firestoreDatabaseId)
+            : serverGetFirestore(clientFbApp);
+        } catch (initErr) {
+          console.error("Failed to dynamically initialize client specific firebase config, fallback to serverDb:", initErr);
+        }
+      }
+
+      if (!dbToUse) {
+        return res.status(500).json({ success: false, error: "Firebase database instance not initialized on server-side" });
       }
 
       // Convert path string (e.g. "a/aa/app_control/stealth_settings") into path elements
       const parts = pathStr.split('/').filter(Boolean);
 
       if (action === 'setDoc') {
-        const docRef = serverDoc(serverDb, parts[0], ...parts.slice(1));
+        const docRef = serverDoc(dbToUse, parts[0], ...parts.slice(1));
         await serverSetDoc(docRef, {
           ...data,
           updatedAtServer: new Date().toISOString()
         }, { merge: true });
         return res.json({ success: true, message: `Document successfully saved through server-side proxy under path: ${pathStr}` });
       } else if (action === 'getDoc') {
-        const docRef = serverDoc(serverDb, parts[0], ...parts.slice(1));
+        const docRef = serverDoc(dbToUse, parts[0], ...parts.slice(1));
         const snap = await serverGetDoc(docRef);
         if (snap.exists()) {
           return res.json({ success: true, exists: true, data: snap.data() });
@@ -1313,12 +1348,12 @@ export const metadata = { type: "${type}", checksum: "${Buffer.from(base64.subst
           return res.json({ success: true, exists: false });
         }
       } else if (action === 'deleteDoc') {
-        const docRef = serverDoc(serverDb, parts[0], ...parts.slice(1));
+        const docRef = serverDoc(dbToUse, parts[0], ...parts.slice(1));
         await serverDeleteDoc(docRef);
         return res.json({ success: true, message: `Document successfully deleted via server-side proxy` });
       } else if (action === 'testConnection') {
         // Run a simple write/read connection test to standard path to verify server access
-        const testRef = serverDoc(serverDb, 'a', 'aa', 'diagnostic_checks', 'server_connection_check');
+        const testRef = serverDoc(dbToUse, 'a', 'aa', 'diagnostic_checks', 'server_connection_check');
         await serverSetDoc(testRef, { lastServerCheck: new Date().toISOString() }, { merge: true });
         const snap = await serverGetDoc(testRef);
         return res.json({ success: true, liveServerConnected: snap.exists() });
