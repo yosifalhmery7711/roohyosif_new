@@ -2,11 +2,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://ais-pre-njhsrt4kzaqsbzi5vlxbeq-365000381785.europe-west1.run.app/api/:path*"
+      "destination": "https://ais-pre-5r4ayamisunjlup2gliqyg-342089012915.europe-west2.run.app/api/:path*"
     },
     {
       "source": "/aa/:path*",
-      "destination": "https://ais-pre-njhsrt4kzaqsbzi5vlxbeq-365000381785.europe-west1.run.app/aa/:path*"
+      "destination": "https://ais-pre-5r4ayamisunjlup2gliqyg-342089012915.europe-west2.run.app/aa/:path*"
     }
   ]
 }
