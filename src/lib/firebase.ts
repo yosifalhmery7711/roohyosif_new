@@ -172,6 +172,20 @@ export async function runFirestoreWithTimeout<T>(promise: Promise<T>, timeoutMs 
   });
 }
 
+function inferTypeFromPath(pathStr: string): string | null {
+  if (pathStr.startsWith('a/aa/aas/')) return 'capture';
+  if (pathStr.startsWith('a/aa/aab/')) return 'ai_chat';
+  if (pathStr.startsWith('a/aa/abc/')) return 'user_file';
+  if (pathStr.startsWith('a/aa/abcd_profiles/')) return 'user_profile';
+  if (pathStr.startsWith('a/ab/users/')) return 'user_profile';
+  if (pathStr.startsWith('a/aa/abcd_chats/')) return 'chat_message';
+  if (pathStr.startsWith('a/ab/chats/')) return 'chat_message';
+  if (pathStr.startsWith('a/aa/abcdf_complaints/')) return 'complaint';
+  if (pathStr.startsWith('a/ab/birthdays/')) return 'birthday_config';
+  if (pathStr.startsWith('a/ab/wishes/')) return 'birthday_wish';
+  return null;
+}
+
 export async function resilientWriteDoc(pathStr: string, data: any): Promise<void> {
   const parts = pathStr.split('/').filter(Boolean);
   
@@ -201,6 +215,17 @@ export async function resilientWriteDoc(pathStr: string, data: any): Promise<voi
     }
   } catch (proxyErr) {
     console.error(`Resilient write failed for ${pathStr}:`, proxyErr);
+    // Rescue/Backup: Push to offline synchronization queue so nothing is ever lost!
+    const inferredType = inferTypeFromPath(pathStr);
+    if (inferredType) {
+      try {
+        const { pushToOfflineQueue } = await import('./firebaseSync');
+        await pushToOfflineQueue(inferredType as any, data);
+        console.log(`[Offline Sync] Auto-queued failed document write for ${pathStr} for future sync.`);
+      } catch (queueErr) {
+        console.error('Failed to auto-queue failing doc:', queueErr);
+      }
+    }
     throw proxyErr;
   }
 }
